@@ -147,7 +147,7 @@ Hinweis. In der Konsole liefert `NestrisHomie.speechInfo()` dieselben Daten:
 
 | Feld | Bedeutung |
 | --- | --- |
-| `voiceCount` | Anzahl gefundener Systemstimmen. `0` heißt: der Browser kann gar nicht sprechen (Linux: `speech-dispatcher` + Sprachpaket prüfen; sonst System-TTS aktivieren). |
+| `voiceCount` | Anzahl gefundener Systemstimmen. `0` heißt: der Browser kann gar nicht sprechen. Auf Linux prüfe `pacman -Q speech-dispatcher` (siehe Abschnitt „Sprachausgabe unter Linux"). |
 | `voice` | Gewählte Stimme, z. B. `Anna (de-DE)` |
 | `lastError` | Letzter Browserfehler, z. B. `not-allowed` (Autoplay-Schutz) oder `no-match` (keine passende Stimme) |
 | `needsGesture` | `true`, solange der Browser die Ausgabe noch blockiert – einmal auf die Seite klicken genügt |
@@ -159,9 +159,33 @@ Die häufigsten Ursachen:
    Interaktion. Einmal klicken oder eine Taste drücken – NestrisHomie wiederholt
    die betroffene Ansage automatisch.
 2. **Keine Stimmen** (`voiceCount: 0`): Das System liefert dem Browser keine
-   Text-to-Speech-Stimme; das Skript kann daran nichts ändern.
+   Text-to-Speech-Stimme. Auf Linux ist das der häufigste Fall – siehe unten.
 3. **Falsche Stimme/Sprache im Panel**: `no-match` – im Panel Stimme auf
    *Automatisch* stellen oder eine passende wählen.
+
+### Sprachausgabe unter Linux
+
+Linux-Browser haben auf Linux kein eigenes Sprachmodul, sondern binden an
+`speech-dispatcher` (SSIP) an. Ist das nicht installiert, ist `voiceCount: 0` –
+das Skript kann daran nichts ändern, die Stimme fehlt dem Browser schlicht.
+
+```bash
+# pacman -Q speech-dispatcher || sudo pacman -S speech-dispatcher
+```
+
+Wichtig für die Browserwahl:
+
+* **Firefox** verhandelt sauber mit `speech-dispatcher` und ist auf Linux der
+  robuster Weg.
+* **Chromium-Browser** (Vivaldi, Chrome, Brave) binden `speech-dispatcher` auf
+  Linux **nicht zuverlässig** an – `getVoices()` bleibt oft dauerhaft leer, obwohl
+  `spd-say` im Terminal läuft (bekanntes Chromium-Verhalten, siehe
+  [Chromium #1057775](https://bugs.chromium.org/p/chromium/issues/detail?id=1057775)).
+  Manche Versionen verlangen zusätzlich den Start mit
+  `--enable-speech-dispatcher`; ob das greift, variiert.
+
+Nach der Installation einmal Firefox neu starten, dann `NestrisHomie.speechInfo()`
+prüfen: `voiceCount > 0` heißt, es kann sprechen.
 
 ## Einschränkungen
 

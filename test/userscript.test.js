@@ -16,6 +16,9 @@
  *   11. Lokales TTS-Backend (Issue #4): Server-Aktivierung per /health,
  *       WAV-Wiedergabe, Cache, Unterbrechung, Autoplay-Sperre,
  *       Circuit-Breaker und Umschaltung auf die Browser-Stimme
+ *   12. Sandbox-Fall (Issue #6): unsafeWindow wird nicht beschrieben, statt
+ *       dessen wird ein Hook-Skript in die Seite injiziert und die Nachrichten
+ *       laufen über ein CustomEvent zurück bis in den Skriptkontext
  *
  * Aufruf: node test/userscript.test.js
  */
@@ -130,11 +133,19 @@ function uiNode(tag = 'div') {
       this._text = v;
     },
     appendChild(child) {
+      child._parent = node;
       node.children.push(child);
       return child;
     },
     append(...kids) {
+      for (const kid of kids) kid._parent = node;
       node.children.push(...kids);
+    },
+    remove() {
+      const parent = node._parent;
+      if (!parent) return;
+      const i = parent.children.indexOf(node);
+      if (i >= 0) parent.children.splice(i, 1);
     },
     addEventListener() {},
     removeEventListener() {},
@@ -166,6 +177,13 @@ class FakeSocket {
   }
   fire(data) {
     for (const fn of this.listeners.message || []) fn({ data });
+  }
+}
+
+class FakeCustomEvent {
+  constructor(type, opts) {
+    this.type = type;
+    this.detail = opts ? opts.detail : undefined;
   }
 }
 
@@ -342,12 +360,24 @@ function setScores(myScore, oppScore) {
 
 const documentRoot = { children: [] };
 
+/* Dokument-Events laufen real über dasselbe Dokument – für den
+   CustomEvent-Rückweg der Sandbox-Injektion (Issue #6) brauchen wir
+   echtes addEventListener/dispatchEvent. */
+const docListeners = new Map();
+
 const documentStub = {
   readyState: 'complete',
   documentElement: uiNode('html'),
   getElementById: () => null,
   createElement: (tag) => uiNode(tag),
-  addEventListener() {},
+  addEventListener(type, fn) {
+    if (!docListeners.has(type)) docListeners.set(type, []);
+    docListeners.get(type).push(fn);
+  },
+  dispatchEvent(ev) {
+    for (const fn of [...(docListeners.get(ev.type) || [])]) fn(ev);
+    return true;
+  },
   querySelector(sel) {
     return findAll(documentRoot.children, sel.trim().split(/\s+/))[0] || null;
   },
@@ -423,6 +453,11 @@ async function run() {
   const socket = new windowStub.WebSocket('wss://nestris.org/ws');
   check('WebSocket-Proxy liefert die Original-Instanz', socket instanceof FakeSocket);
   check('Hook-Marker gesetzt', Boolean(windowStub.WebSocket.__nestrisHomieHooked));
+  check(
+    'Hook-Modus "Seitenkontext"',
+    api.state.hook.mode === 'Seitenkontext' && api.state.hook.installed === true,
+    JSON.stringify(api.state.hook),
+  );
 
   api.setSettings({ eventGapSec: 0, intervalSec: 600 });
 
@@ -826,6 +861,116 @@ async function run() {
     spoken.some((s) => s.includes('Browser-Stimme')), JSON.stringify(spoken));
   check('kein Serverzugriff mehr', gm.posts.length === postsBefore);
   check('Backend-Info konsistent', api.speechInfo().server.wanted === false);
+
+  /* ---------------------------------------------------------------
+   * 12. Sandbox-Fall (Issue #6): Der Manager ignoriert @sandbox und
+   *     liefert unsafeWindow != window. Dann darf die Seite NICHT über
+   *     unsafeWindow verändert werden; stattdessen wird ein Hook-Skript
+   *     injiziert (hier von Hand ausgeführt, wie der Browser es täte)
+   *     und die Nachrichten kommen per CustomEvent zurück.
+   * --------------------------------------------------------------- */
+  console.log('12. Sandbox-Fall: Seitenkontext-Injektion statt unsafeWindow');
+  {
+    const createdScripts = [];
+    const realCreate = documentStub.createElement;
+    documentStub.createElement = (tag) => {
+      const node = realCreate(tag);
+      if (tag === 'script') createdScripts.push(node);
+      return node;
+    };
+
+    const pageWindow = { WebSocket: FakeSocket };
+    const sandboxWindow = {
+      WebSocket: FakeSocket,
+      speechSynthesis: fakeSpeech,
+      SpeechSynthesisUtterance: FakeUtterance,
+      addEventListener() {},
+      removeEventListener() {},
+      location: { href: 'https://nestris.org/online/room' },
+    };
+    const sandbox2 = {
+      window: sandboxWindow,
+      unsafeWindow: pageWindow,
+      document: documentStub,
+      localStorage: localStorageStub,
+      console,
+      speechSynthesis: fakeSpeech,
+      SpeechSynthesisUtterance: FakeUtterance,
+      GM_xmlhttpRequest: fakeGM,
+      Audio: FakeAudio,
+      URL: fakeURL,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+    };
+    vm.createContext(sandbox2);
+    try {
+      vm.runInContext(code, sandbox2, { filename: 'nestris-homie.user.js (Sandbox)' });
+      check('lädt ohne Fehler', true);
+    } catch (err) {
+      check('lädt ohne Fehler', false, err.stack);
+    }
+
+    const api2 = sandboxWindow.NestrisHomie;
+    check('Debug-API im Skriptkontext', Boolean(api2));
+    check(
+      'unsafeWindow bleibt unbeschrieben',
+      pageWindow.WebSocket === FakeSocket && !pageWindow.WebSocket.__nestrisHomieHooked,
+    );
+    check(
+      'Hook-Modus "Injektion"',
+      api2 && api2.state.hook.mode === 'Injektion',
+      JSON.stringify(api2 && api2.state.hook),
+    );
+
+    const injected = createdScripts[0];
+    check(
+      'Hook-Skript wurde injiziert',
+      Boolean(injected) && injected.textContent.includes('__nestrisHomieHooked'),
+      injected ? injected.textContent.slice(0, 60) : 'kein script-Node',
+    );
+
+    if (injected) {
+      // Ausführung wie im Browser: in der Seiten-Welt, mit geteiltem Dokument.
+      const pageCtx = { window: pageWindow, document: documentStub, CustomEvent: FakeCustomEvent };
+      vm.createContext(pageCtx);
+      vm.runInContext(injected.textContent, pageCtx);
+
+      check('Hook in der Seite gelandet', Boolean(pageWindow.WebSocket.__nestrisHomieHooked));
+      check(
+        'HOOK_OK-Event hat die Statusmeldung gesetzt',
+        api2.state.hook.installed === true,
+        JSON.stringify(api2.state.hook),
+      );
+
+      const pageSocket = new pageWindow.WebSocket('wss://nestris.org/ws');
+      check('Seiten-Socket ist die Original-Instanz', pageSocket instanceof FakeSocket);
+
+      const before = api2.state.hook.lastMsgAt;
+      pageSocket.fire({ binary: true });
+      check('nicht-String-Nachricht wird ignoriert', api2.state.hook.lastMsgAt === before);
+
+      pageSocket.fire(
+        JSON.stringify({
+          type: 'in_room_status',
+          status: 'player',
+          roomState: {
+            type: 'MULTIPLAYER',
+            status: 'IN_GAME',
+            ranked: true,
+            players: [{ username: 'ich' }, { username: 'gegner' }],
+            points: [],
+          },
+        }),
+      );
+      check('IN_GAME kam über die Brücke an', api2.state.status === 'IN_GAME', `ist ${api2.state.status}`);
+      check('Raumrolle über die Brücke', api2.state.roomStatus === 'player');
+      check('Empfangszeitpunkt vermerkt', api2.state.hook.lastMsgAt > 0);
+    }
+
+    documentStub.createElement = realCreate;
+  }
 
   console.log('');
   if (failed === 0) {

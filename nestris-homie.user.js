@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.5.0
+// @version      0.5.1
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
 //               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
@@ -10,7 +10,10 @@
 // @match        https://nestris.org/*
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
 // @grant        unsafeWindow
+// @sandbox      MAIN_WORLD
+// @inject-into  page
 // @connect      127.0.0.1
 // @connect      localhost
 // @noframes
@@ -37,12 +40,15 @@
 
   const LOG = '[NestrisHomie]';
 
-  /* Mit @grant läuft das Skript in einer Tampermonkey-Sandbox: dort ist
-     window nicht das Seitenfenster der Website. Der WebSocket-Hook
-     (Abschnitt 4) muss deshalb unsafeWindow verwenden – nur dort hängt sich
-     der Proxy an den Konstruktor, den die Seite wirklich benutzt. In
-     grant-freien Umgebungen (Tests, Notfall-Update ohne Tampermonkey)
-     bleibt window der Seitenkontext. */
+  /* Injection-Kontext (Issue #6): @sandbox MAIN_WORLD (Tampermonkey) bzw.
+     @inject-into page (Violentmonkey) sollen das Skript trotz der Grants für
+     den GM-Zugriff in den Seitenkontext legen – so lief es bis v0.4.0 mit
+     @grant none problemlos. Beachtet der Manager das nicht (Firefox leitet
+     aus @grant unsafeWindow einen eigenen Sandbox-Kontext ab), hängt sich der
+     WebSocket-Hook per Inline-Injektion an die Seite (Abschnitt 4) und lädt
+     die Nachrichten über ein CustomEvent zurück; unsafeWindow wird dabei
+     bewusst nie beschrieben. In grant-freien Umgebungen (Tests, Notfall-Update
+     ohne Tampermonkey) ist window ohnehin der Seitenkontext. */
   const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* ============================================================
@@ -169,10 +175,21 @@
       return clamp(Number(settings.ttsTimeoutSec) || 4, 1, 30) * 1000;
     }
 
-    /** Zugriff auf den Server über Tampermonkey; löst mit dem GM-Antwortobjekt. */
+    /** Zugriff auf den Server über Tampermonkey; löst mit dem GM-Antwortobjekt.
+        Je nach Inject-Kontext (Issue #6) stellt Tampermonkey die klassische
+        Global-Funktion oder den GM-Namensraum bereit – wir nehmen, was da ist. */
+    function gmXhrFn() {
+      if (typeof GM_xmlhttpRequest === 'function') return GM_xmlhttpRequest;
+      if (typeof GM !== 'undefined' && GM && typeof GM.xmlHttpRequest === 'function') {
+        return GM.xmlHttpRequest.bind(GM);
+      }
+      return null;
+    }
+
     function gmRequest(opts) {
       return new Promise((resolve, reject) => {
-        if (typeof GM_xmlhttpRequest !== 'function') {
+        const gmXhr = gmXhrFn();
+        if (!gmXhr) {
           reject(new Error('GM_xmlhttpRequest fehlt (kein Tampermonkey?)'));
           return;
         }
@@ -182,7 +199,7 @@
           settled = true;
           fn(arg);
         };
-        GM_xmlhttpRequest({
+        gmXhr({
           method: opts.method || 'GET',
           url: opts.url,
           data: opts.data,
@@ -825,52 +842,142 @@
     });
   }
 
+  /* Brücke Sandbox -> Seite (Issue #6): die injizierte Hook-Fassung schickt
+     jede JSON-Nachricht als CustomEvent an das gemeinsame Dokument zurück. */
+  const WS_EVENT = 'nestris-homie-ws';
+  const HOOK_OK_EVENT = 'nestris-homie-hook-ok';
+
+  /** JSON-Nachricht der Seite prüfen und an unsere Handler verteilen. */
+  function handleWsJson(data) {
+    // Binäre Pakete (Spielstand/Board) brauchen wir nicht – dort steckt der
+    // Score in einem bitgenauen Protokoll. Die JSON-Ereignisse reichen uns.
+    if (typeof data !== 'string') return;
+    let msg;
+    try {
+      msg = JSON.parse(data);
+    } catch (err) {
+      return;
+    }
+    if (!msg || typeof msg.type !== 'string') return;
+    state.hook.lastMsgAt = Date.now();
+    dispatch(msg);
+  }
+
+  /* Selbständige Hook-Fassung für den Seitenkontext: läuft außerhalb unseres
+     Skriptbereichs und darf deshalb keine Bindungen an unsere Variablen
+     benutzen – nur DOM, window und die beiden Event-Namen. Der Marker sitzt
+     im get-Trap, nicht per defineProperty: das würde am Proxy vorbei auf dem
+     nativen Seitenkonstruktor landen (Testabschnitt 12). */
+  const PAGE_HOOK_SNIPPET = `(() => {
+  const W = window;
+  if (!W.WebSocket) return;
+  if (W.WebSocket.__nestrisHomieHooked) {
+    document.dispatchEvent(new CustomEvent('${HOOK_OK_EVENT}'));
+    return;
+  }
+  const Native = W.WebSocket;
+  const hooked = new Proxy(Native, {
+    construct(target, args) {
+      const socket = new target(...args);
+      try {
+        socket.addEventListener('message', (ev) => {
+          if (typeof ev.data !== 'string') return;
+          document.dispatchEvent(new CustomEvent('${WS_EVENT}', { detail: ev.data }));
+        });
+      } catch (err) {}
+      return socket;
+    },
+    get(target, prop, receiver) {
+      if (prop === '__nestrisHomieHooked') return true;
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  W.WebSocket = hooked;
+  document.dispatchEvent(new CustomEvent('${HOOK_OK_EVENT}'));
+})();`;
+
   /**
    * Hängt sich an den WebSocket der Seite, ohne die Kommunikation anzutasten.
    * Muss vor dem Seitenaufruf installiert werden (@run-at document-start).
+   *
+   * Zwei Wege (Issue #6 – Regression "Detecting game..." seit v0.5.0):
+   *  - Seitenkontext (@sandbox MAIN_WORLD, @grant none): wir sind die Seite,
+   *    der Proxy hängt direkt an window.WebSocket – der bewährte Weg bis 0.4.0.
+   *  - Sandbox (Fallback, wenn der Manager @sandbox nicht beachtet): die Seite
+   *    wird NICHT über unsafeWindow verändert (das war der Verdächtige),
+   *    sondern ein Inline-Skript injiziert, das den Konstruktor in der Seite
+   *    umhängt und die Nachrichten per CustomEvent zurückschickt. nestris.org
+   *    hat keine Content-Security-Policy (geprüft); schlägt die Injektion
+   *    fehl, bleibt die Seite unberührt und die Statuszeile weist den
+   *    Mitschnitt als inaktiv aus.
    */
   function installWebSocketHook() {
-    // pageWin, nicht window: mit @grant sitzt das Skript in der Sandbox,
-    // die Seite baut ihren Socket aber aus dem echten Seitenfenster.
-    const Native = pageWin.WebSocket;
-    if (!Native || Native.__nestrisHomieHooked) return;
+    const sandboxed = typeof unsafeWindow !== 'undefined' && unsafeWindow !== window;
 
-    const hooked = new Proxy(Native, {
-      construct(target, args) {
-        const socket = new target(...args);
-        try {
-          attachSocket(socket);
-        } catch (err) {
-          console.warn(LOG, 'WebSocket konnte nicht beobachtet werden', err);
-        }
-        return socket;
-      },
-      get(target, prop, receiver) {
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
+    if (sandboxed) {
+      installInjectedHook();
+      return;
+    }
+
+    state.hook.mode = 'Seitenkontext';
+    const Native = window.WebSocket;
+    if (Native && !Native.__nestrisHomieHooked) {
+      const hooked = new Proxy(Native, {
+        construct(target, args) {
+          const socket = new target(...args);
+          try {
+            attachSocket(socket);
+          } catch (err) {
+            console.warn(LOG, 'WebSocket konnte nicht beobachtet werden', err);
+          }
+          return socket;
+        },
+        get(target, prop, receiver) {
+          // Marker im get-Trap: per defineProperty landete er am Proxy vorbei
+          // auf dem nativen Seitenkonstruktor (Page-Objekt) – hier bleibt der
+          // unberührt, gleichwohl meldet sich window.WebSocket als gehookt.
+          if (prop === '__nestrisHomieHooked') return true;
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      window.WebSocket = hooked;
+    }
+    state.hook.installed = Boolean(window.WebSocket && window.WebSocket.__nestrisHomieHooked);
+    console.log(LOG, 'WebSocket-Mitschnitt aktiv (Seitenkontext)');
+  }
+
+  /** Sandbox-Fall: Hook in die Seite injizieren, Nachrichten per CustomEvent. */
+  function installInjectedHook() {
+    state.hook.mode = 'Injektion';
+    document.addEventListener(WS_EVENT, (ev) => handleWsJson(ev && ev.detail));
+    document.addEventListener(HOOK_OK_EVENT, () => {
+      state.hook.installed = true;
+      updateStatusLine();
     });
 
-    Object.defineProperty(hooked, '__nestrisHomieHooked', { value: true });
-    pageWin.WebSocket = hooked;
-    console.log(LOG, 'WebSocket-Mitschnitt aktiv');
+    const inject = () => {
+      const parent = document.documentElement;
+      if (!parent) {
+        document.addEventListener('DOMContentLoaded', inject, { once: true });
+        return;
+      }
+      try {
+        const script = document.createElement('script');
+        script.textContent = PAGE_HOOK_SNIPPET;
+        parent.appendChild(script);
+        script.remove();
+      } catch (err) {
+        console.warn(LOG, 'Injektion in den Seitenkontext fehlgeschlagen', err);
+      }
+    };
+    inject();
+    console.log(LOG, 'WebSocket-Mitschnitt: Seitenkontext-Injektion (Sandbox)');
   }
 
   function attachSocket(socket) {
-    socket.addEventListener('message', (event) => {
-      const data = event.data;
-      // Binäre Pakete (Spielstand/Board) brauchen wir nicht – dort steckt der
-      // Score in einem bitgenauen Protokoll. Die JSON-Ereignisse reichen uns.
-      if (typeof data !== 'string') return;
-      let msg;
-      try {
-        msg = JSON.parse(data);
-      } catch (err) {
-        return;
-      }
-      if (!msg || typeof msg.type !== 'string') return;
-      dispatch(msg);
-    });
+    socket.addEventListener('message', (event) => handleWsJson(event.data));
   }
 
   /* ============================================================
@@ -1087,6 +1194,9 @@
     meSig: null,             // dasselbe für die eigene Seite
     meSigAt: null,
     opponentOut: false,      // einmal pro Spiel: der Gegner ist raus
+    // WebSocket-Mitschnitt (Issue #6): wie der Hook installiert wurde und
+    // ob je eine Nachricht ankam – für die Statuszeile und die Konsole.
+    hook: { mode: '–', installed: false, lastMsgAt: 0 },
   };
 
   function isPlaying() {
@@ -1681,25 +1791,34 @@
     return line;
   }
 
+  /** Kurzzeile zum WebSocket-Mitschnitt (Issue #6 – Regressionstest). */
+  function hookStatusText() {
+    const h = state.hook;
+    if (!h.installed) return 'Mitschnitt: inaktiv (⚠ Hook nicht in der Seite)';
+    const fresh = state.wsSeen ? '' : ' · noch keine WS-Nachricht';
+    return `Mitschnitt: aktiv (${h.mode})${fresh}`;
+  }
+
   function updateStatusLine() {
     if (!ui.updateStatus) return;
+    const render = (text) => ui.updateStatus(`${text}\n${hookStatusText()}`);
     if (!settings.enabled) {
-      ui.updateStatus(`Status: deaktiviert\n${speechStatusText()}`);
+      render(`Status: deaktiviert\n${speechStatusText()}`);
       return;
     }
     if (!inRoom()) {
-      ui.updateStatus(`Status: kein Match (warte auf Raum)\n${speechStatusText()}`);
+      render(`Status: kein Match (warte auf Raum)\n${speechStatusText()}`);
       return;
     }
     const s = state.scores;
     const role = state.roomStatus === 'spectator' ? 'Zuschauer' : 'Spieler';
     if (!s) {
-      ui.updateStatus(`Status: ${state.status || '–'} · ${role} · keine Spieldaten\n${speechStatusText()}`);
+      render(`Status: ${state.status || '–'} · ${role} · keine Spieldaten\n${speechStatusText()}`);
       return;
     }
     const diff = s.diff === null ? '–' : (s.diff > 0 ? '+' : '') + s.diff;
     const out = state.opponentOut ? ' · Gegner raus' : '';
-    ui.updateStatus(
+    render(
       `Status: ${state.status || '–'} · ${role}\n` +
         `Du: ${s.myScore ?? '–'} · Gegner: ${s.oppScore ?? '–'} · Differenz: ${diff}${out}\n` +
         speechStatusText(),
@@ -1774,6 +1893,15 @@
     installWebSocketHook();
     registerServerHandlers();
     ServerTTS.start();
+    // Diagnose für Issue #6: Welcher Kontext greift und ist der Hook gelandet?
+    console.log(LOG, 'Startkontext:', {
+      hook: state.hook.mode,
+      mitschnitt: state.hook.installed,
+      sandbox: typeof unsafeWindow !== 'undefined' && unsafeWindow !== window,
+      gmXhr:
+        typeof GM_xmlhttpRequest === 'function' ||
+        (typeof GM !== 'undefined' && Boolean(GM) && typeof GM.xmlHttpRequest === 'function'),
+    });
 
     onSettingsChanged(() => {
       if (!settings.enabled) {

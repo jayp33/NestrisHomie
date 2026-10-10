@@ -111,6 +111,16 @@ CSS-Klasse `.side.me`, ob du selbst spielst.
 4. **Seite neu laden** – der WebSocket-Mitschnitt muss vor dem Seitenstart
    installiert werden (`@run-at document-start`).
 
+Damit die Seite trotz der Grants (für den optionalen TTS-Server) in Ruhe
+gelassen wird, erzwingt der Skript-Kopf den Seitenkontext:
+`@sandbox MAIN_WORLD` (Tampermonkey) bzw. `@inject-into page`
+(Violentmonkey). Beachtet der Manager das nicht, hängt sich der Hook per
+Inline-Skript direkt in der Seite ein und holt die Nachrichten über ein
+CustomEvent zurück (Issue #6). Die Statuszeile im Dialog zeigt den
+gewählten Weg: `Mitschnitt: aktiv (Seitenkontext)` bzw. `(Injektion)` –
+`inaktiv` heißt, die Injektion wurde blockiert, die Seite läuft aber
+unberührt weiter.
+
 Danach erscheint unten rechts eine 🎙-Schaltfläche mit dem Einstellungsdialog.
 
 ### Einstellungen

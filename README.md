@@ -112,16 +112,16 @@ CSS-Klasse `.side.me`, ob du selbst spielst.
    installiert werden (`@run-at document-start`).
 
 Damit die Seite trotz der Grants (für den optionalen TTS-Server) in Ruhe
-gelassen wird, erzwingt der Skript-Kopf den Seitenkontext: `@sandbox raw`
-(Tampermonkey) bzw. `@inject-into page` (Violentmonkey). Ein
-`@grant unsafeWindow` gibt es bewusst nicht mehr – es erzwingt bei
-Tampermonkey auf Firefox einen eigenen Sonderkontext und war der Auslöser der
-Regression aus Issue #6. Beachtet der Manager `@sandbox` nicht, hängt sich
-der Hook per Inline-Skript direkt in die Seite ein und holt die Nachrichten
-über ein CustomEvent zurück. Die Statuszeile im Dialog zeigt den gewählten
-Weg: `Mitschnitt: aktiv (Seitenkontext)` bzw. `(Injektion)` – `inaktiv`
-heißt, die Injektion wurde blockiert, die Seite läuft aber unberührt
-weiter. Denselben Stand ohne Konsole am Skript zeigt
+gelassen wird, fordert der Skript-Kopf den Seitenkontext an: `@sandbox raw`
+(Tampermonkey) bzw. `@inject-into page` (Violentmonkey); ein
+`@grant unsafeWindow` gibt es bewusst nicht mehr. **Auf Chromium setzt
+Tampermonkey das derzeit nicht um** (Stand v0.5.2, siehe Issue #6) – das
+Skript läuft dann in einer Sandbox, hängt sich per Inline-Skript in die
+Seite ein und holt die Nachrichten über ein CustomEvent zurück. Die
+Statuszeile im Dialog zeigt den tatsächlichen Weg:
+`Mitschnitt: aktiv (Seitenkontext)` bzw. `(Injektion)` – `inaktiv` heißt,
+die Injektion wurde blockiert, die Seite läuft aber unberührt weiter.
+Denselben Stand ohne Konsole am Skript zeigt
 `JSON.parse(document.documentElement.dataset.nestrisHomie)`.
 
 Danach erscheint unten rechts eine 🎙-Schaltfläche mit dem Einstellungsdialog.
@@ -365,6 +365,11 @@ ausgeliefert.
 
 ## Einschränkungen
 
+* **Bekannter Fehler (Issue #6):** Seit v0.5.0 erkennt die Seite den
+  Spielstart nicht mehr, wenn das Skript aktiv ist – „Detecting game..."
+  bleibt stehen und das Ranked-Match bricht nach ~10 s ab. Ursache noch
+  offen (in einer Sandbox läuft das Skript auf Chromium), Zwischenstand und
+  Testplan: [docs/regression-issue6.md](docs/regression-issue6.md).
 * Die Selektoren richten sich an der aktuellen nestris.org-Oberfläche. Ändert
   sich das Frontend, sind vor allem die Konstanten `DOM_SEL` (Abschnitt 5) zu
   prüfen – Anleitung in [docs/protokoll.md](docs/protokoll.md), Abschnitt 5.

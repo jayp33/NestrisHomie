@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.2.0
+// @version      0.3.0
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Spiel-/Matchende, Trophäen).
 // @author       NestrisHomie
@@ -365,17 +365,29 @@
       : String(v);
   }
 
+  /* Ansagen der Differenz werden auf ganze Tausender gerundet: Vorsprung
+     abwärts, Rückstand aufwärts. 1 Punkt Rückstand heißt also schon
+     "eintausend Punkte Rückstand", 500 Punkte Vorsprung werden zur
+     "knappen" Führung ohne Zahl (siehe aheadKnapp). */
+  const roundLeadDown = (d) => Math.floor(d / 1000) * 1000;
+  const roundDeficitUp = (d) => Math.ceil(d / 1000) * 1000;
+  /** Kleiner als eine Tausend: Führung knapp, ohne Punktangabe ansagen. */
+  const isNarrowLead = (d) => Math.abs(d) < 1000;
+
   const TEXTS = {
     de: {
       started: (opponent) => (opponent ? `Spiel gegen ${opponent} gestartet.` : 'Spiel gestartet.'),
       foundOpponent: () => 'Gegner gefunden.',
       ahead: (d) => `Du liegst vorn mit ${fmt(d)} Punkten Vorsprung.`,
+      aheadKnapp: () => 'Du liegst knapp vorn.',
       behind: (d) => `Du liegst hinten mit ${fmt(d)} Punkten Rückstand.`,
       tied: (score) => `Gleichstand bei ${fmt(score)} Punkten.`,
       scores: (me, opp, name) => `Punkte: du ${fmt(me)}, ${name || 'Gegner'} ${fmt(opp)}.`,
       series: (me, opp) => `Spielstand ${fmtSeries(me)} zu ${fmtSeries(opp)}.`,
       leadTaken: () => 'Du übernimmst die Führung!',
+      leadTakenKnapp: () => 'Du übernimmst knapp die Führung!',
       leadLost: () => 'Du hast die Führung abgegeben.',
+      leadLostKnapp: () => 'Du hast die Führung knapp abgegeben.',
       gameWon: (me, opp) => `Spiel gewonnen. ${fmt(me)} zu ${fmt(opp)} Punkten.`,
       gameLost: (me, opp) => `Spiel verloren. ${fmt(opp)} zu ${fmt(me)} Punkte.`,
       gameTied: (me) => `Spiel unentschieden bei ${fmt(me)} Punkten.`,
@@ -392,12 +404,15 @@
       started: (opponent) => (opponent ? `Game against ${opponent} started.` : 'Game started.'),
       foundOpponent: () => 'Opponent found.',
       ahead: (d) => `You are ahead by ${fmt(d)} points.`,
+      aheadKnapp: () => 'You are narrowly ahead.',
       behind: (d) => `You are behind by ${fmt(d)} points.`,
       tied: (score) => `Tied at ${fmt(score)} points.`,
       scores: (me, opp, name) => `Scores: you ${fmt(me)}, ${name || 'opponent'} ${fmt(opp)}.`,
       series: (me, opp) => `Series ${fmtSeries(me)} to ${fmtSeries(opp)}.`,
       leadTaken: () => 'You take the lead!',
+      leadTakenKnapp: () => 'You narrowly take the lead!',
       leadLost: () => 'You lost the lead.',
+      leadLostKnapp: () => 'You narrowly lost the lead.',
       gameWon: (me, opp) => `Game won, ${fmt(me)} to ${fmt(opp)}.`,
       gameLost: (me, opp) => `Game lost, ${fmt(opp)} to ${fmt(me)}.`,
       gameTied: (me) => `Game tied at ${fmt(me)}.`,
@@ -731,9 +746,14 @@
     if (!s || s.diff === null) return t('noData');
 
     let text;
-    if (s.diff > 0) text = t('ahead', s.diff);
-    else if (s.diff < 0) text = t('behind', -s.diff);
-    else text = t('tied', s.myScore ?? 0);
+    if (s.diff > 0) {
+      // Vorsprung abwärts gerundet – unter 1000 ohne Zahl ansagen.
+      const vorsprung = roundLeadDown(s.diff);
+      text = vorsprung > 0 ? t('ahead', vorsprung) : t('aheadKnapp');
+    } else if (s.diff < 0) {
+      // Rückstand aufwärts gerundet – 1 Punkt heißt schon "eintausend".
+      text = t('behind', roundDeficitUp(-s.diff));
+    } else text = t('tied', s.myScore ?? 0);
 
     if (settings.announceScores && s.myScore !== null && s.oppScore !== null) {
       text += ' ' + t('scores', s.myScore, s.oppScore, s.oppName);
@@ -807,7 +827,11 @@
     // 0 = Gleichstand: kein echter Führungswechsel, nicht ansagen.
     if (sign === 0 || prev === 0 || sign === prev) return;
     if (!settings.announceLeadChange) return;
-    emitEvent(sign > 0 ? t('leadTaken') : t('leadLost'));
+    if (sign > 0) {
+      emitEvent(t(isNarrowLead(s.diff) ? 'leadTakenKnapp' : 'leadTaken'));
+    } else {
+      emitEvent(t(isNarrowLead(s.diff) ? 'leadLostKnapp' : 'leadLost'));
+    }
   }
 
   /* ============================================================

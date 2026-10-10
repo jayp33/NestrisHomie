@@ -18,6 +18,23 @@ Zusätzlich kommen Events, wenn sich etwas Wesentliches tut.
 | Vorsprung / Gleichstand / Rückstand (+ Differenz) | alle 30 s (Intervall frei wählbar) |
 | Beide Punktestände | optional, zusammen mit der Intervallansage |
 | „Du übernimmst die Führung!" / „… Führung abgegeben" | sofort beim Führungswechsel |
+
+Die genannte **Differenz wird auf ganze Tausender gerundet**, damit die
+Ansprache nicht in Einzelpunkten herumhackt: Vorsprung abwärts, Rückstand
+aufwärts.
+
+| Situation | Angesagt |
+| --- | --- |
+| 25 432 Punkte Vorsprung | „fünfundzwanzigtausend Punkte Vorsprung" (abgerundet) |
+| 500 Punkte Vorsprung | „Du liegst knapp vorn." (keine Zahl) |
+| 1 000 Punkte Vorsprung | „eintausend Punkte Vorsprung" (erst ab 1000 mit Zahl) |
+| 1 Punkt Rückstand | „eintausend Punkten Rückstand" (aufgerundet) |
+| 1 501 Punkte Rückstand | „zweitausend Punkten Rückstand" (aufgerundet) |
+
+Ein Führungswechsel unter 1000 Punkten klingt entsprechend abgeschwächt:
+„Du übernimmst knapp die Führung!" bzw. „Du hast die Führung knapp
+abgegeben." Absolute Punktestände (die optionalen) bleiben ungerundet –
+dort zählt der genaue Wert.
 | Spielstart (inkl. Gegnername) | bei Statuswechsel auf `IN_GAME` |
 | Spielergebnis (Sieg / Niederlage / Remis mit Endstand) | wenn ein Spiel im Match endet |
 | Matchergebnis + Spielstand (z. B. „zwei zu eins") | bei `AFTER_MATCH` |

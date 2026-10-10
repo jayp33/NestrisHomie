@@ -373,18 +373,83 @@ async function run() {
   );
   api.setSettings({ intervalSec: 600 });
 
+  console.log('4c. Rundung der Differenz auf Tausender');
+  // Vorsprung abwärts, Rückstand aufwärts – siehe roundLeadDown/roundDeficitUp.
+  // Achtung: previewAnnouncement() liest state.scores, das erst im 400-ms-
+  // Polling nach setScores() nachzieht – deshalb hier je Fall warten.
+  setScores(120432, 95000);
+  await sleep(500);
+  check(
+    'Vorsprung wird abwärts gerundet (25432 -> 25000)',
+    api.previewAnnouncement().includes('fünfundzwanzigtausend'),
+    api.previewAnnouncement(),
+  );
+
+  setScores(95500, 95000);
+  await sleep(500);
+  check(
+    'Vorsprung unter 1000 wird ohne Zahl angesagt',
+    api.previewAnnouncement().includes('knapp vorn'),
+    api.previewAnnouncement(),
+  );
+
+  setScores(96000, 95000);
+  await sleep(500);
+  check(
+    'Vorsprung von 1000 wird als Zahl angesagt',
+    api.previewAnnouncement().includes('eintausend'),
+    api.previewAnnouncement(),
+  );
+
+  setScores(95000, 95001);
+  await sleep(500);
+  check(
+    'Rückstand wird aufwärts gerundet (1 -> 1000)',
+    api.previewAnnouncement().includes('eintausend Punkten Rückstand'),
+    api.previewAnnouncement(),
+  );
+
+  setScores(95000, 96501);
+  await sleep(500);
+  check(
+    'Rückstand von 1501 wird auf 2000 aufgerundet',
+    api.previewAnnouncement().includes('zweitausend Punkten Rückstand'),
+    api.previewAnnouncement(),
+  );
+
   console.log('5. Führungswechsel');
-  await sleep(500); // ein Polling-Durchlauf (400 ms)
-  check('Führungslogik initialisiert (Vorsprung)', api.state.lastSign === 1, `ist ${api.state.lastSign}`);
-  setScores(90000, 95000);
+  check('Führungslogik initialisiert (Rückstand)', api.state.lastSign === -1, `ist ${api.state.lastSign}`);
+  setScores(120000, 95000);
   await sleep(600);
   check(
-    'Rückstand angesagt',
-    spoken.some((s) => s.includes('Führung abgegeben')),
+    'Vorsprung angesagt',
+    spoken.some((s) => s.includes('übernimmst die Führung')),
+    JSON.stringify(spoken),
+  );
+
+  // Knapper Führungswechsel (< 1000 Punkte) soll "knapp" heißen.
+  console.log('5b. Knapper Führungswechsel');
+  spoken.length = 0;
+  setScores(95500, 96000); // 500 Punkte Rückstand -> knapp
+  await sleep(600);
+  check(
+    'knapper Führungsverlust angesagt',
+    spoken.some((s) => s.includes('knapp abgegeben')),
+    JSON.stringify(spoken),
+  );
+  spoken.length = 0;
+  setScores(96600, 96000); // 600 Punkte Vorsprung -> knapp
+  await sleep(600);
+  check(
+    'knapper Führungswechsel angesagt',
+    spoken.some((s) => s.includes('knapp die Führung')),
     JSON.stringify(spoken),
   );
 
   console.log('6. Matchende');
+  setScores(90000, 95000);
+  await sleep(600);
+  spoken.length = 0;
   socket.fire(
     JSON.stringify({
       type: 'room_state_update',

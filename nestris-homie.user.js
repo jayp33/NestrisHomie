@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.8.0
+// @version      0.8.1
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
 //               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
@@ -1664,8 +1664,9 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     state.roomState = next;
     state.status = next.status || null;
 
-    // Seed/Level Overlay: anzeigen wenn BEFORE_GAME und seed/level vorhanden (Issue #10)
-    if (state.status === STATUS.BEFORE_GAME && next.seed !== undefined && next.startLevel !== undefined) {
+    // Seed/Level Overlay: anzeigen wenn BEFORE_GAME und startLevel vorhanden (Issue #10)
+    // Seed ist optional (nicht in allen roomState-Varianten enthalten)
+    if (state.status === STATUS.BEFORE_GAME && next.startLevel !== undefined) {
       showSeedLevelOverlay(next);
     }
 
@@ -2156,9 +2157,6 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     panel.querySelector('select[data-key="language"]').addEventListener('change', () => {
       setTimeout(() => ui.refreshVoices(TTS.getVoices()), 50);
     });
-  panel.querySelector('select[data-key="language"]').addEventListener('change', () => {
-      setTimeout(() => ui.refreshVoices(TTS.getVoices()), 50);
-    });
   }
 
   /** Erstellt das Seed/Level Overlay (Issue #10). */
@@ -2212,12 +2210,16 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     const levelEl = document.getElementById('nh-level-value');
 
     // Seed und Level aus roomState lesen
-    // roomState kann seed, startLevel enthalten
+    // Seed ist optional (nicht in allen roomState-Varianten enthalten)
     if (seedEl && roomState && roomState.seed !== undefined) {
       seedEl.textContent = roomState.seed;
+    } else if (seedEl) {
+      seedEl.textContent = '–';
     }
     if (levelEl && roomState && roomState.startLevel !== undefined) {
       levelEl.textContent = roomState.startLevel;
+    } else if (levelEl) {
+      levelEl.textContent = '–';
     }
 
     overlay.style.display = 'flex';

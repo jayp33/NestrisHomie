@@ -68,6 +68,21 @@ NestrisHomie.state.hook
 (`status`/`raum` = null: Außerhalb eines Matches gelesen, keine Aussage
 zum Defekt. `aktiv` = Skript eingeschaltet.)
 
+**Match-Beobachtung (v0.5.2):** Vor dem Hänger wird die Ansage
+**„Spiel gegen ‹Gegner› gestartet."** korrekt ausgegeben. Sie feuert bei
+uns am WS-Statuswechsel `→ IN_GAME` (`onStatusChange`, Text
+`TEXT.started`). Das belegt:
+
+* WS-Nachrichten des Matches kommen **während des Matches** im Skript an
+  (nicht erst beim Seitenladen – `letzteWs` allein hätte das nicht
+  bewiesen).
+* Unser Status ist mit dem der Seite bis `IN_GAME` **synchron**: Beide
+  haben dieselben Raumnachrichten erhalten (die Seite zeigt „Detecting
+  game..." ja nur bei `status === IN_GAME`).
+* Der Ausfall beginnt danach: Die Seite bestätigt den Spielbeginn in der
+  OCR-/Capture-Kette nie (`PIECE_DROPPING` nicht erkannt), ihr `ocrTimer$`
+  schickt nach ~10 s `{type: "ABORT"}`.
+
 **Was die Werte belegen:**
 
 * `mitschnitt: true`, `wsGesehen: true`, `letzteWs` gesetzt → Hook und
@@ -99,7 +114,9 @@ zum Defekt. `aktiv` = Skript eingeschaltet.)
 
 ## 5. Ausgeschlossen
 
-* ✗ Unser Mitschnitt als Ursache (Hook + Brücke funktionieren, Abschnitt 3).
+* ✗ Unser Mitschnitt als Ursache (Hook + Brücke funktionieren, Abschnitt 3;
+  die Match-Ansage „Spiel gegen ‹Gegner› gestartet." läuft vor dem Hänger
+  korrekt – die WS-Ereignisse kommen also zur Matchzeit an).
 * ✗ CSS-Leak: alle Style-Selektoren unter `#nestris-homie-*`, auch im Diff
   0.4.0 → 0.5.0 geprüft.
 * ✗ `@grant unsafeWindow` als *alleinige* Sandbox-Ursache (0.5.2 entfernt →

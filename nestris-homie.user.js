@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.8.3
+// @version      0.9.0
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
 //               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
@@ -72,6 +72,8 @@
     eventGapSec: 6,           // Mindestabstand zwischen Event-Ansagen
     // Runway (Lines-Differenz) ansagen, wenn >= 10 Reihen (Issue #5)
     announceLines: true,
+    // Levelwechsel-Warnung bei 90/120 Lines (Issue #11)
+    announceLevelChange: true,
     // Seed/Level Overlay vor Matchbeginn (Issue #10)
     showSeedLevelOverlay: true,
     // Sprach-Backend (Issue #4): 'auto' = lokaler neuronaler Server, sonst
@@ -794,6 +796,8 @@
       test: () => 'Sprachassistent ist bereit.',
       linesAhead: (d) => `Du hast ${fmt(d)} Reihen mehr als der Gegner.`,
       linesBehind: (d) => `Du hast ${fmt(d)} Reihen weniger als der Gegner.`,
+      levelWarn90: () => 'Achtung: 90 Linien erreicht – Levelwechsel bald!',
+      levelWarn120: () => 'Achtung: 120 Linien erreicht – Levelwechsel bald!',
     },
     en: {
       started: (opponent) => (opponent ? `Game against ${opponent} started.` : 'Game started.'),
@@ -825,6 +829,8 @@
       test: () => 'Voice assistant is ready.',
       linesAhead: (d) => `You have ${fmt(d)} more lines than opponent.`,
       linesBehind: (d) => `You have ${fmt(d)} fewer lines than opponent.`,
+      levelWarn90: () => 'Warning: 90 lines reached – level change soon!',
+      levelWarn120: () => 'Warning: 120 lines reached – level change soon!',
     },
   };
 
@@ -1652,6 +1658,9 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     meSig: null,             // dasselbe für die eigene Seite
     meSigAt: null,
     opponentOut: false,      // einmal pro Spiel: der Gegner ist raus
+    // Levelwechsel-Warnung (Issue #11): welche Schwellen schon angesagt wurden
+    levelWarn90: false,
+    levelWarn120: false,
     // WebSocket-Mitschnitt (Issue #6): wie der Hook installiert wurde und
     // ob je eine Nachricht ankam – für die Statuszeile und die Konsole.
     hook: { mode: '–', installed: false, lastMsgAt: 0 },
@@ -1774,6 +1783,8 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     state.inGameSince = null;
     state.endedAt = null;
     state.pendingTrophy = null;
+    state.levelWarn90 = false;
+    state.levelWarn120 = false;
     resetTopoutWatch();
     TTS.clearPending('periodic');
     // Laufende Ansagen bewusst NICHT abbrechen: Das Ergebnis eines gerade
@@ -1918,6 +1929,24 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       emitEvent(t(isNarrowLead(s.diff) ? 'leadTakenKnapp' : 'leadTaken'));
     } else {
       emitEvent(t(isNarrowLead(s.diff) ? 'leadLostKnapp' : 'leadLost'));
+    }
+  }
+
+  /** Levelwechsel-Warnung bei 90/120 Lines prüfen (Issue #11). */
+  function checkLevelWarn(s) {
+    if (!isPlaying() || !settings.announceLevelChange) return;
+    if (!s || s.myLines === null) return;
+
+    const lines = s.myLines;
+    // 90 Lines Warnung
+    if (!state.levelWarn90 && lines >= 90) {
+      state.levelWarn90 = true;
+      emitEvent(t('levelWarn90'), { interrupt: false, requireGap: true });
+    }
+    // 120 Lines Warnung
+    if (!state.levelWarn120 && lines >= 120) {
+      state.levelWarn120 = true;
+      emitEvent(t('levelWarn120'), { interrupt: false, requireGap: true });
     }
   }
 
@@ -2074,6 +2103,7 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       <label class="row"><span>Chasedown / Sieg ansagen</span><input type="checkbox" data-key="announceTopout"></label>
       <label class="row"><span>Chat: glhf / gg</span><input type="checkbox" data-key="announceChat"></label>
       <label class="row"><span>Runway (Reihen) ansagen</span><input type="checkbox" data-key="announceLines"></label>
+      <label class="row"><span>Levelwechsel warnen (90/120)</span><input type="checkbox" data-key="announceLevelChange"></label>
       <label class="row"><span>Seed/Level Overlay</span><input type="checkbox" data-key="showSeedLevelOverlay"></label>
       <label class="row"><span>Topout erkennen nach</span>
         <input type="number" min="3" max="60" step="1" data-key="topoutSec"> Sek. Stillstand</label>
@@ -2333,7 +2363,10 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     }
     const s = readScores();
     state.scores = s;
-    if (s) handleLeadChange(s);
+    if (s) {
+      handleLeadChange(s);
+      checkLevelWarn(s);
+    }
     watchTopout();
     updateStatusLine();
   }

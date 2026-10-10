@@ -202,8 +202,14 @@ Daraus lässt sich der Spielstatus ohne WebSocket grob rekonstruieren
    `topoutSec`, während die eigene weiterläuft und mindestens ein „schnelles"
    Signal (Board/DRT/Next Piece) vorhanden ist, gilt der Gegner als raus –
    es folgt die Sieges- oder Chasedown-Ansage (siehe Abschnitt 2.3).
-5. **Sprachausgabe** über die Web Speech API mit einer Warteschlange
-   (periodische Ansagen können verdrängt werden, Events haben Vorrang).
+5. **Sprachausgabe** über eine Warteschlange (periodische Ansagen können
+   verdrängt werden, Events haben Vorrang). Es gibt zwei Backends: die
+   Web Speech API des Browsers und – optional – ein lokales neuronales
+   Netz (audio.cpp + Supertonic auf `127.0.0.1:8099`, siehe README
+   „Sprachausgabe über einen lokalen TTS-Server"). Weil nestris.org HTTPS
+   und der Server HTTP spricht, läuft der Serverzugriff privilegiert über
+   `GM_xmlhttpRequest`; deshalb nutzt das Skript Grants und hängt den
+   WebSocket-Hook an `unsafeWindow` statt `window` (Konstante `pageWin`).
 
 ## 5. Wartung / Was bei Änderungen zu prüfen ist
 

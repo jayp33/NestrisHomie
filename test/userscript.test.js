@@ -13,6 +13,9 @@
  *       weiterläuft, wird "Der Gegner ist raus!" angesagt (Sieg bzw. Lücke)
  *   7. AFTER_MATCH erzeugt die Match-Ende-Ansage (über den Spielstand)
  *   8. trophy_change wird angesagt
+ *   11. Lokales TTS-Backend (Issue #4): Server-Aktivierung per /health,
+ *       WAV-Wiedergabe, Cache, Unterbrechung, Autoplay-Sperre,
+ *       Circuit-Breaker und Umschaltung auf die Browser-Stimme
  *
  * Aufruf: node test/userscript.test.js
  */
@@ -217,6 +220,78 @@ const fakeSpeech = {
 };
 
 /* ---------------------------------------------------------------
+ * Fake lokaler TTS-Server (GM_xmlhttpRequest) & WAV-Wiedergabe
+ * --------------------------------------------------------------- */
+
+const gm = {
+  mode: 'off', // 'off' = nicht erreichbar, 'ok' = gesunde Antworten
+  posts: [],
+  healthChecks: 0,
+};
+
+function fakeGM(req) {
+  const respond = (status, response) =>
+    setTimeout(() => req.onload({ status, response, responseText: response }), 5);
+  if (gm.mode !== 'ok') {
+    setTimeout(() => req.onerror({}), 5);
+    return;
+  }
+  if (req.method === 'GET' && /\/health$/.test(req.url)) {
+    gm.healthChecks += 1;
+    respond(200, '{"status":"ok"}');
+    return;
+  }
+  if (req.method === 'POST' && /\/v1\/audio\/speech$/.test(req.url)) {
+    gm.posts.push(String(req.data));
+    respond(200, { size: 410600 }); // WAV-Blob-Platzhalter
+    return;
+  }
+  respond(404, '');
+}
+
+const fakeAudioState = {
+  instances: [],
+  playMode: 'ok', // 'ok' | 'blocked' (Autoplay-Sperre) | 'hang' (spielt nie fertig)
+};
+
+class FakeAudio {
+  constructor(url) {
+    this.url = url;
+    this.playbackRate = 1;
+    this.volume = 1;
+    this.paused = true;
+    this.onended = null;
+    this.onerror = null;
+    fakeAudioState.instances.push(this);
+  }
+  play() {
+    this.paused = false;
+    const mode = fakeAudioState.playMode;
+    if (mode === 'blocked') {
+      return Promise.reject(
+        Object.assign(new Error('Autoplay blockiert'), { name: 'NotAllowedError' }),
+      );
+    }
+    if (mode === 'hang') return Promise.resolve();
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        this.paused = true;
+        if (this.onended) this.onended();
+        resolve();
+      }, 5);
+    });
+  }
+  pause() {
+    this.paused = true;
+  }
+}
+
+const fakeURL = {
+  createObjectURL: (blob) => `blob:fake-${blob && blob.size}`,
+  revokeObjectURL: () => {},
+};
+
+/* ---------------------------------------------------------------
  * Spiel-DOM aufbauen (kann im Test verändert werden)
  * --------------------------------------------------------------- */
 
@@ -308,6 +383,9 @@ const sandbox = {
   console,
   speechSynthesis: fakeSpeech,
   SpeechSynthesisUtterance: FakeUtterance,
+  GM_xmlhttpRequest: fakeGM,
+  Audio: FakeAudio,
+  URL: fakeURL,
   setTimeout,
   clearTimeout,
   setInterval,
@@ -664,6 +742,90 @@ async function run() {
     spoken.includes('Unterbrochene Ansage'), JSON.stringify(spoken));
   check('Kein Rückstau alter Ansagen', spoken.filter((s) => s === 'Erste Ansage').length <= 1,
     JSON.stringify(spoken));
+
+  console.log('11. Lokales TTS-Backend (audio.cpp + Supertonic, Issue #4)');
+  // Server läuft: /health beantwortet, WAV-Anfragen werden bedient.
+  gm.mode = 'ok';
+  api.setSettings({ ttsBackend: 'server' });
+  await sleep(80); // /health-Prüfung
+  check('Server nach /health-Prüfung aktiv',
+    api.speechInfo().server.ready === true, JSON.stringify(api.speechInfo().server));
+  check('/health wurde abgefragt', gm.healthChecks > 0);
+
+  gm.posts.length = 0;
+  fakeAudioState.instances.length = 0;
+  spoken.length = 0;
+  api.say('Spiel gewonnen. 320000 zu 280000 Punkten.');
+  await sleep(200); // 80 ms Warteschlange + je 5 ms Synthese/Abspielen
+  check('Ansage ging als WAV an den Server',
+    gm.posts.some((p) => p.includes('Spiel gewonnen')), JSON.stringify(gm.posts));
+  check('WAV wurde abgespielt',
+    fakeAudioState.instances.length === 1 && fakeAudioState.instances[0].paused === true,
+    JSON.stringify(fakeAudioState.instances.map((a) => a.paused)));
+  check('Tempo-Einstellung wirkt auf die WAV',
+    fakeAudioState.instances[0].playbackRate === 1.2,
+    String(fakeAudioState.instances[0].playbackRate));
+  check('Browser-Stimme blieb still',
+    !spoken.some((s) => s.includes('Spiel gewonnen')), JSON.stringify(spoken));
+  check('Syntheselatenz wird gemeldet',
+    typeof api.speechInfo().server.latencyMs === 'number',
+    JSON.stringify(api.speechInfo().server));
+
+  // Zweite identische Ansage kommt aus dem Sitzungs-Cache.
+  api.say('Spiel gewonnen. 320000 zu 280000 Punkten.');
+  await sleep(200);
+  check('wiederholte Ansage aus dem Cache (kein zweiter POST)',
+    gm.posts.filter((p) => p.includes('Spiel gewonnen')).length === 1,
+    String(gm.posts.length));
+  check('Cache-Größe wird gemeldet', api.speechInfo().server.cacheSize >= 1);
+
+  // Unterbrechung: eine hängengebliebene WAV wird gestoppt und verworfen.
+  fakeAudioState.playMode = 'hang';
+  api.say('Der Gegner ist raus! Du gewinnst das Spiel.');
+  await sleep(150);
+  const hanging = fakeAudioState.instances[fakeAudioState.instances.length - 1];
+  fakeAudioState.playMode = 'ok';
+  api.say('Spiel verloren. 280000 zu 320000 Punkten.', { interrupt: true });
+  await sleep(300);
+  check('laufende WAV beim Unterbrechen angehalten',
+    hanging.paused === true, String(hanging.paused));
+  check('unterbrechende Ansage kam dennoch an',
+    gm.posts.some((p) => p.includes('Spiel verloren')), JSON.stringify(gm.posts));
+
+  // Autoplay-Sperre: play() verweigert, nach Nutzergeste wird wiederholt.
+  fakeAudioState.playMode = 'blocked';
+  api.say('Gegner gefunden.');
+  await sleep(200);
+  check('Autoplay-Sperre des Players erkannt',
+    api.speechInfo().needsGesture === true, JSON.stringify(api.speechInfo().needsGesture));
+  fakeAudioState.playMode = 'ok';
+  const retriedServer = api.retryFailedSpeech();
+  await sleep(300);
+  check('Wiederholung nach Geste ausgelöst', retriedServer === true);
+  check('Ansage nach Geste über den Server gesprochen',
+    fakeAudioState.instances.length >= 3, String(fakeAudioState.instances.length));
+
+  // Server fällt aus: nach zwei Fehlern übernimmt die Browser-Stimme.
+  gm.mode = 'error';
+  spoken.length = 0;
+  api.say('Trophäen erhöht.');
+  await sleep(500);
+  check('Backend als gescheitert markiert',
+    api.speechInfo().server.mode === 'failed', JSON.stringify(api.speechInfo().server));
+  check('Ansage übernimmt die Browser-Stimme',
+    spoken.some((s) => s.includes('Trophäen')), JSON.stringify(spoken));
+
+  // Bewusste Umschaltung: kein Serverzugriff mehr.
+  api.setSettings({ ttsBackend: 'browser' });
+  await sleep(80);
+  const postsBefore = gm.posts.length;
+  spoken.length = 0;
+  api.say('Zurück zur Browser-Stimme.');
+  await sleep(250);
+  check('Browser-Stimme spricht',
+    spoken.some((s) => s.includes('Browser-Stimme')), JSON.stringify(spoken));
+  check('kein Serverzugriff mehr', gm.posts.length === postsBefore);
+  check('Backend-Info konsistent', api.speechInfo().server.wanted === false);
 
   console.log('');
   if (failed === 0) {

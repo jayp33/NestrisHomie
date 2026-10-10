@@ -1,14 +1,18 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.4.0
+// @version      0.5.0
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
-//               Spiel-/Matchende, Trophäen).
+//               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
+//               über einen lokalen neuronalen TTS-Server (audio.cpp + Supertonic, Issue #4).
 // @author       NestrisHomie
 // @match        https://nestris.org/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      127.0.0.1
+// @connect      localhost
 // @noframes
 // ==/UserScript==
 
@@ -16,6 +20,7 @@
  * Aufbau des Skripts:
  *   1. Einstellungen (localStorage)
  *   2. Sprachausgabe (Web Speech API) inkl. Sprechwarteschlange
+ *   2a. Lokaler TTS-Server (audio.cpp + Supertonic, optional, Issue #4)
  *   3. Textbausteine + deutsche Zahlwörter
  *   4. WebSocket-Mitschnitt (JSON-Events des Spiels)
  *   5. DOM-Zugriff (Scores, Namen, Spielstand)
@@ -31,6 +36,14 @@
   'use strict';
 
   const LOG = '[NestrisHomie]';
+
+  /* Mit @grant läuft das Skript in einer Tampermonkey-Sandbox: dort ist
+     window nicht das Seitenfenster der Website. Der WebSocket-Hook
+     (Abschnitt 4) muss deshalb unsafeWindow verwenden – nur dort hängt sich
+     der Proxy an den Konstruktor, den die Seite wirklich benutzt. In
+     grant-freien Umgebungen (Tests, Notfall-Update ohne Tampermonkey)
+     bleibt window der Seitenkontext. */
+  const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   /* ============================================================
    * 1. Einstellungen
@@ -53,6 +66,13 @@
     announceTopout: true,     // Chasedown/Sieg, sobald der Gegner topoutet
     topoutSec: 5,             // Stillstand der Gegneranzeige, der als Topout gilt
     eventGapSec: 6,           // Mindestabstand zwischen Event-Ansagen
+    // Sprach-Backend (Issue #4): 'auto' = lokaler neuronaler Server, sonst
+    // Browser-Stimme; 'server' erzwingt den Server, 'browser' schließt ihn aus.
+    ttsBackend: 'auto',
+    ttsUrl: 'http://127.0.0.1:8099', // lokaler audio.cpp-Dienst
+    ttsVoice: 'M1',                  // Supertonic-Stimme des Servers
+    ttsTimeoutSec: 4,                // Timeout für Server-Anfragen
+    serverRate: 1.2,                 // Abspielgeschwindigkeit der WAV-Ansagen
   };
 
   /** @type {typeof DEFAULTS} */
@@ -83,7 +103,7 @@
     writeJson(SETTINGS_KEY, settings);
     settingsListeners.forEach((fn) => {
       try {
-        fn(settings);
+        fn(settings, patch);
       } catch (err) {
         console.warn(LOG, err);
       }
@@ -106,6 +126,303 @@
   /* ============================================================
    * 2. Sprachausgabe
    * ============================================================ */
+
+  /* ------------------------------------------------------------
+   * 2a. Lokaler TTS-Server (audio.cpp + Supertonic, Issue #4)
+   * ------------------------------------------------------------
+   * Der optionale Dienst auf 127.0.0.1:8099 synthetisiert unsere Sätze als
+   * WAV über eine OpenAI-kompatible /v1/audio/speech-Schnittstelle –
+   * deutlich natürlicher als espeak-ng. Weil nestris.org per HTTPS läuft
+   * und der Server HTTP spricht, blockiert der Browser ein normales fetch()
+   * als Mixed Content. Umweg: GM_xmlhttpRequest (Tampermonkey-Privileg,
+   * @connect 127.0.0.1), das privilegiert antwortet.
+   *
+   * Verhalten:
+   *   - 'auto': /health prüfen, bei Erfolg den Server nutzen, sonst die
+   *     Browser-Stimme. Ein startender Dienst bekommt drei Anläufe.
+   *   - Zwei aufeinanderfolgende Fehler schalten für die Sitzung ab
+   *     (Circuit Breaker); danach spricht wieder speechSynthesis.
+   *   - WAVs werden pro Sitzung gecacht – unsere Texte wiederholen sich
+   *     (gerundete Tausenderdifferenzen), Wiederholungen sind dann sofort da.
+   *   - Laufende Synthese lässt sich serverseitig nicht abbrechen; ein
+   *     epoch-Zähler verwirft das Ergebnis, bevor es zu hören wäre.
+   */
+
+  const ServerTTS = (() => {
+    /** 'unknown' | 'ready' | 'failed' */
+    let mode = 'unknown';
+    let failures = 0;
+    let lastError = null;
+    let lastLatencyMs = null;
+    /** @type {Map<string, {size:number}>} Text -> WAV-Blob */
+    const cache = new Map();
+    /** Generationenzähler: steigt bei jeder Unterbrechung. */
+    let epoch = 0;
+    /** @type {null | (() => void)} stoppt die laufende Wiedergabe */
+    let stopCurrent = null;
+
+    function baseUrl() {
+      return String(settings.ttsUrl || '').replace(/\/+$/, '');
+    }
+
+    function requestTimeoutMs() {
+      return clamp(Number(settings.ttsTimeoutSec) || 4, 1, 30) * 1000;
+    }
+
+    /** Zugriff auf den Server über Tampermonkey; löst mit dem GM-Antwortobjekt. */
+    function gmRequest(opts) {
+      return new Promise((resolve, reject) => {
+        if (typeof GM_xmlhttpRequest !== 'function') {
+          reject(new Error('GM_xmlhttpRequest fehlt (kein Tampermonkey?)'));
+          return;
+        }
+        let settled = false;
+        const finish = (fn, arg) => {
+          if (settled) return;
+          settled = true;
+          fn(arg);
+        };
+        GM_xmlhttpRequest({
+          method: opts.method || 'GET',
+          url: opts.url,
+          data: opts.data,
+          headers: opts.headers,
+          responseType: opts.responseType,
+          timeout: opts.timeout,
+          onload: (res) => finish(resolve, res),
+          onerror: () => finish(reject, new Error('Netzwerkfehler')),
+          ontimeout: () => finish(reject, new Error('Zeitüberschreitung')),
+          onabort: () => finish(reject, new Error('Abgebrochen')),
+        });
+      });
+    }
+
+    /** Kurze Lebensprüfung; true, wenn der Dienst mit "status ok" antwortet. */
+    function probe(timeoutMs = 800) {
+      if (!baseUrl()) return Promise.resolve(false);
+      return gmRequest({
+        url: `${baseUrl()}/health`,
+        responseType: 'text',
+        timeout: timeoutMs,
+      }).then(
+        (res) =>
+          res.status >= 200 &&
+          res.status < 300 &&
+          /"status"\s*:\s*"ok"/.test(String(res.response ?? '')),
+        () => false,
+      );
+    }
+
+    function noteOk(ms) {
+      lastLatencyMs = ms;
+      failures = 0;
+    }
+
+    function noteFail(err) {
+      failures += 1;
+      lastError = { name: (err && err.message) || 'Fehler', at: Date.now() };
+      console.warn(LOG, 'TTS-Serverfehler', failures, lastError.name);
+      if (failures >= 2 && mode !== 'failed') {
+        mode = 'failed';
+        console.warn(
+          LOG,
+          'TTS-Server zweimal gescheitert – für diese Sitzung wird die Browser-Stimme verwendet',
+        );
+        updateStatusLine();
+      }
+    }
+
+    /** true, wenn gerade der Server sprechen soll. */
+    function active() {
+      return mode === 'ready' && settings.ttsBackend !== 'browser';
+    }
+
+    /** Sitzungs-Cache; Schlüssel enthält Stimme und Sprache. */
+    function cacheKey(text) {
+      return `${settings.ttsVoice || 'M1'}|${settings.language || 'de'}|${text}`;
+    }
+
+    function getWav(text) {
+      const key = cacheKey(text);
+      const hit = cache.get(key);
+      if (hit) return Promise.resolve(hit);
+      const body = JSON.stringify({
+        model: 'supertonic-3',
+        input: text,
+        voice: String(settings.ttsVoice || 'M1'),
+        language: String(settings.language || 'de'),
+        response_format: 'wav',
+      });
+      const t0 = Date.now();
+      return gmRequest({
+        method: 'POST',
+        url: `${baseUrl()}/v1/audio/speech`,
+        data: body,
+        headers: { 'Content-Type': 'application/json' },
+        responseType: 'blob',
+        timeout: requestTimeoutMs(),
+      }).then((res) => {
+        if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
+        const blob = res.response;
+        if (!blob || typeof blob.size !== 'number' || blob.size === 0) {
+          throw new Error('leere Antwort');
+        }
+        cache.set(key, blob);
+        noteOk(Date.now() - t0);
+        return blob;
+      });
+    }
+
+    /** WAV abspielen; löst mit 'ended' | 'stopped' | 'blocked' oder Fehler. */
+    function play(url, onGesture) {
+      return new Promise((resolve, reject) => {
+        const audio = new Audio(url);
+        let settled = false;
+        const finish = (how) => {
+          if (settled) return;
+          settled = true;
+          if (stopCurrent === stop) stopCurrent = null;
+          try {
+            audio.pause();
+          } catch (err) {
+            /* ignorieren */
+          }
+          try {
+            URL.revokeObjectURL(url);
+          } catch (err) {
+            /* ignorieren */
+          }
+          resolve(how);
+        };
+        const stop = () => finish('stopped');
+        stopCurrent = stop;
+        audio.volume = clamp(settings.volume, 0, 1);
+        audio.playbackRate = clamp(settings.serverRate, 0.5, 2);
+        audio.onended = () => finish('ended');
+        audio.onerror = () => {
+          if (settled) return;
+          settled = true;
+          if (stopCurrent === stop) stopCurrent = null;
+          try {
+            URL.revokeObjectURL(url);
+          } catch (err) {
+            /* ignorieren */
+          }
+          reject(new Error('Wiedergabe fehlgeschlagen'));
+        };
+        let started = null;
+        try {
+          started = audio.play();
+        } catch (err) {
+          audio.onerror();
+          return;
+        }
+        if (started && typeof started.catch === 'function') {
+          started.catch((err) => {
+            if (settled) return;
+            const name = (err && err.name) || '';
+            if (name === 'NotAllowedError' || name === 'NotSupportedError') {
+              // Autoplay-Sperre – wie bei speechSynthesis nach Geste wiederholen.
+              finish('blocked');
+              onGesture();
+            } else {
+              audio.onerror();
+            }
+          });
+        }
+      });
+    }
+
+    /**
+     * Synthetisiert (ggf. aus dem Cache) und spielt ab. Ruft genau einen der
+     * Rückläufer: onDone, onError oder – bei Autoplay-Sperre – onGesture.
+     */
+    function speak(text, { onDone, onError, onGesture }) {
+      const myEpoch = epoch;
+      getWav(text)
+        .then((blob) => {
+          if (myEpoch !== epoch) return 'dropped';
+          return play(URL.createObjectURL(blob), onGesture);
+        })
+        .then((how) => {
+          if (how === 'dropped') return;
+          if (how === 'blocked') {
+            onGesture();
+            return;
+          }
+          onDone();
+        })
+        .catch((err) => {
+          if (myEpoch !== epoch) return;
+          noteFail(err);
+          onError(err);
+        });
+    }
+
+    /** Laufende Wiedergabe stoppen, Synthese-Ergebnis verwerfen. */
+    function interrupt() {
+      epoch += 1;
+      if (stopCurrent) {
+        const stop = stopCurrent;
+        stopCurrent = null;
+        stop();
+      }
+    }
+
+    /** (Neu-)Prüfung des Servers; startet bei Bedarf mehrere Anläufe. */
+    function revalidate(tryNo = 0) {
+      if (settings.ttsBackend === 'browser') {
+        mode = 'unknown';
+        return;
+      }
+      probe().then((ok) => {
+        if (ok) {
+          if (mode !== 'ready') console.log(LOG, 'Lokaler TTS-Server aktiv:', baseUrl());
+          mode = 'ready';
+          failures = 0;
+          updateStatusLine();
+          return;
+        }
+        if (tryNo < 2) {
+          // Ein neu gestarteter Dienst öffnet den Port erst nach dem
+          // Modellladen (gemessen: ~4,8 s) – deshalb weitere Anläufe.
+          setTimeout(() => revalidate(tryNo + 1), 2500 * (tryNo + 1));
+          return;
+        }
+        if (mode !== 'failed') {
+          console.log(LOG, 'TTS-Server nicht erreichbar – Browser-Stimme wird verwendet');
+        }
+        mode = 'failed';
+        updateStatusLine();
+      });
+    }
+
+    function start() {
+      revalidate();
+      onSettingsChanged((s, patch) => {
+        if (!patch || (!('ttsBackend' in patch) && !('ttsUrl' in patch))) return;
+        failures = 0;
+        lastError = null;
+        mode = 'unknown';
+        revalidate();
+        updateStatusLine();
+      });
+    }
+
+    function getInfo() {
+      return {
+        mode,
+        ready: active(),
+        wanted: settings.ttsBackend !== 'browser',
+        failures,
+        lastError,
+        latencyMs: lastLatencyMs,
+        cacheSize: cache.size,
+      };
+    }
+
+    return { start, active, speak, interrupt, revalidate, getInfo };
+  })();
 
   const TTS = (() => {
     const supported = typeof window.speechSynthesis !== 'undefined';
@@ -165,15 +482,19 @@
         queue.unshift({ text, kind });
       }
       if (interrupt) {
+        // Server-WAV stoppen, falls eine läuft; ihr Ergebnis wird verworfen.
+        ServerTTS.interrupt();
         if (speechSynthesis.speaking) {
           try {
             speechSynthesis.cancel();
           } catch (err) {
             /* ignorieren */
           }
-          busy = false;
-          current = null;
         }
+        // Die Warteschlange darf nie klemmen: auch ohne cancel() (etwa beim
+        // Server-Backend) muss die Unterbrechung busy lösen.
+        busy = false;
+        current = null;
         // Chrome verschluckt speak(), das direkt auf cancel() folgt – auch wenn
         // speechSynthesis.speaking bereits wieder false meldet. Deshalb immer
         // kurz warten, wenn unterbrochen wird.
@@ -207,8 +528,49 @@
     }
 
     function pump() {
-      if (!supported || busy || queue.length === 0) return;
+      if (busy || queue.length === 0) return;
+      // Keine Stimme im Browser und kein Server aktiv -> keine Ansage möglich.
+      if (!supported && !ServerTTS.getInfo().ready) return;
       const item = queue.shift();
+
+      busy = true;
+      startedAt = Date.now();
+      // Token statt der Utterance als "laufende Ansage": dieselbe Identität
+      // prüft sowohl der Browser- als auch der Server-Pfad.
+      const token = { text: item.text, kind: ServerTTS.active() ? 'server' : 'browser' };
+      current = token;
+      const done = () => {
+        if (current !== token) return;
+        busy = false;
+        current = null;
+        setTimeout(pump, 60);
+      };
+
+      if (ServerTTS.active()) {
+        ServerTTS.speak(item.text, {
+          onDone: done,
+          onGesture: () => {
+            // Autoplay-Sperre: nach der nächsten Nutzergeste erneut anbieten.
+            needsGesture = true;
+            retryItem = item;
+            done();
+          },
+          onError: (err) => {
+            lastError = {
+              name: (err && err.message) || 'Serverfehler',
+              text: item.text,
+              at: Date.now(),
+            };
+            console.warn(LOG, 'Server-Ansage fehlgeschlagen:', item.text, err);
+            // Nochmals anbieten: nach zwei Fehlern hat noteFail() das Backend
+            // abgeschaltet, der Durchlauf läuft dann über die Browser-Stimme.
+            queue.unshift(item);
+            done();
+          },
+        });
+        return;
+      }
+
       const utter = new SpeechSynthesisUtterance(item.text);
       const voice = pickVoice();
       if (voice) utter.voice = voice;
@@ -217,15 +579,6 @@
       utter.pitch = clamp(settings.pitch, 0.5, 2);
       utter.volume = clamp(settings.volume, 0, 1);
 
-      busy = true;
-      startedAt = Date.now();
-      current = utter;
-      const done = () => {
-        if (current !== utter) return;
-        busy = false;
-        current = null;
-        setTimeout(pump, 60);
-      };
       utter.onstart = () => {
         // Sprache funktioniert – etwaige Sperre ist behoben.
         needsGesture = false;
@@ -255,8 +608,11 @@
 
       // Workaround: Chrome "vergisst" das Sprechen nach einiger Zeit und
       // onend feuert nie. Aufsichts-Timer hält die Warteschlange am Laufen.
+      // Betrifft nur die Browser-Stimme – eine laufende Server-WAV (mehrere
+      // Sekunden, speechSynthesis meldet "nicht sprechend") darf er nicht
+      // als hängengeblieben werten.
       setInterval(() => {
-        if (!busy) return;
+        if (!busy || !current || current.kind !== 'browser') return;
         const speaking = speechSynthesis.speaking;
         if (speaking && speechSynthesis.paused) {
           speechSynthesis.resume();
@@ -282,6 +638,7 @@
         queueLength: queue.length,
         speaking: supported ? speechSynthesis.speaking : false,
         paused: supported ? speechSynthesis.paused : false,
+        server: ServerTTS.getInfo(),
       };
     }
 
@@ -473,7 +830,9 @@
    * Muss vor dem Seitenaufruf installiert werden (@run-at document-start).
    */
   function installWebSocketHook() {
-    const Native = window.WebSocket;
+    // pageWin, nicht window: mit @grant sitzt das Skript in der Sandbox,
+    // die Seite baut ihren Socket aber aus dem echten Seitenfenster.
+    const Native = pageWin.WebSocket;
     if (!Native || Native.__nestrisHomieHooked) return;
 
     const hooked = new Proxy(Native, {
@@ -493,7 +852,7 @@
     });
 
     Object.defineProperty(hooked, '__nestrisHomieHooked', { value: true });
-    window.WebSocket = hooked;
+    pageWin.WebSocket = hooked;
     console.log(LOG, 'WebSocket-Mitschnitt aktiv');
   }
 
@@ -1119,13 +1478,23 @@
       <label class="row"><span>Stimme</span><select data-key="voiceURI"></select></label>
       <label class="row"><span>Tempo</span><input type="range" min="0.6" max="1.6" step="0.05" data-key="rate"></label>
       <label class="row"><span>Lautstärke</span><input type="range" min="0" max="1" step="0.05" data-key="volume"></label>
+      <label class="row"><span>Sprach-Backend</span>
+        <select data-key="ttsBackend">
+          <option value="auto">Auto (Server, sonst Browser)</option>
+          <option value="server">Server (Supertonic)</option>
+          <option value="browser">Browser (speechSynthesis)</option>
+        </select></label>
+      <label class="row"><span>TTS-Server</span><input type="text" data-key="ttsUrl" size="20"></label>
+      <label class="row"><span>Server-Stimme</span><input type="text" data-key="ttsVoice" size="6"></label>
 
       <div class="buttons">
         <button class="act" data-action="test">Ansage testen</button>
         <button class="act" data-action="close">Schließen</button>
       </div>
       <p class="hint">Ansagen starten automatisch, sobald ein Spiel läuft (Status IN_GAME).
-         Einstellungen werden lokal im Browser gespeichert.</p>
+         Einstellungen werden lokal im Browser gespeichert.
+         "Server" ist der lokale audio.cpp-Dienst (siehe README „Sprachausgabe
+         über einen lokalen TTS-Server"); ohne ihn übernimmt automatisch die Browser-Stimme.</p>
     `;
 
     root.append(panel, toggle);
@@ -1149,11 +1518,12 @@
     panel.querySelector('[data-action="test"]').addEventListener('click', () => {
       unlockSpeech();
       const info = TTS.getInfo();
-      if (!info.supported) {
+      const serverActive = Boolean(info.server && info.server.ready);
+      if (!info.supported && !serverActive) {
         ui.updateStatus('Status: Sprachausgabe wird von diesem Browser nicht unterstützt.');
         return;
       }
-      if (info.voiceCount === 0) {
+      if (!serverActive && info.voiceCount === 0) {
         ui.updateStatus(
           'Status: Der Browser hat KEINE Sprachstimmen geliefert.\n' +
             'Die Ansage kann deshalb nicht funktionieren.',
@@ -1250,8 +1620,9 @@
    * eine gescheiterte Ansage automatisch.
    */
   function unlockSpeech() {
-    if (!TTS.supported) return;
-    if (!speechUnlocked) {
+    // Der stumme Probe-Übergang braucht nur die Browser-Stimme; für die
+    // Server-WAV genügt die Nutzergeste selbst (audio.play() ist dann frei).
+    if (TTS.supported && !speechUnlocked) {
       speechUnlocked = true;
       try {
         const u = new SpeechSynthesisUtterance(' ');
@@ -1284,15 +1655,25 @@
   /** Kurzbeschreibung des Sprachzustands für die Statuszeile. */
   function speechStatusText() {
     const info = TTS.getInfo();
-    if (!info.supported) return 'Sprache: wird vom Browser nicht unterstützt';
-    if (info.voiceCount === 0) {
-      // Häufigster Fall: Linux. Chromium-Browser (Vivaldi/Chrome/Brave/Chromium)
-      // haben speech-dispatcher eingebaut, halten die Anbindung aber per Flag
-      // versteckt (siehe README "Sprachausgabe unter Linux").
-      return 'Sprache: KEINE Stimmen gefunden – auf Linux "speech-dispatcher" installieren; Chromium-Browser zusätzlich mit --enable-speech-dispatcher starten';
+    const server = info.server || {};
+    let line;
+    if (server.ready) {
+      const ms =
+        server.latencyMs === null || server.latencyMs === undefined ? '' : ` · ${server.latencyMs} ms`;
+      line = `Sprache: lokaler Server (${settings.ttsVoice || 'M1'}, ${server.cacheSize} im Cache${ms})`;
+    } else {
+      if (!info.supported) return 'Sprache: wird vom Browser nicht unterstützt';
+      if (info.voiceCount === 0) {
+        // Häufigster Fall: Linux. Chromium-Browser (Vivaldi/Chrome/Brave/Chromium)
+        // haben speech-dispatcher eingebaut, halten die Anbindung aber per Flag
+        // versteckt (siehe README "Sprachausgabe unter Linux").
+        return 'Sprache: KEINE Stimmen gefunden – auf Linux "speech-dispatcher" installieren; Chromium-Browser zusätzlich mit --enable-speech-dispatcher starten';
+      }
+      const voice = info.voice ? `${info.voice.name} (${info.voice.lang})` : 'Standardstimme';
+      line = server.wanted
+        ? `Sprache: Browser-Stimme (TTS-Server nicht erreichbar, ${voice})`
+        : `Sprache: ${voice}`;
     }
-    const voice = info.voice ? `${info.voice.name} (${info.voice.lang})` : 'Standardstimme';
-    let line = `Sprache: ${voice}`;
     if (info.needsGesture) line += ' · ⚠ bitte einmal klicken (Autoplay-Schutz)';
     else if (info.lastError && Date.now() - info.lastError.at < 15000) {
       line += ` · ⚠ Fehler: ${info.lastError.name}`;
@@ -1392,6 +1773,7 @@
   function start() {
     installWebSocketHook();
     registerServerHandlers();
+    ServerTTS.start();
 
     onSettingsChanged(() => {
       if (!settings.enabled) {
@@ -1433,7 +1815,7 @@
 
   // Debug-Hilfe in der Browserkonsole:
   //   NestrisHomie.state, NestrisHomie.say('Hallo')
-  window.NestrisHomie = {
+  const debugApi = {
     get state() {
       return state;
     },
@@ -1457,13 +1839,17 @@
         ...info,
         voice: info.voice ? `${info.voice.name} (${info.voice.lang})` : null,
         hinweis:
-          !info.supported
-            ? 'Browser unterstützt speechSynthesis nicht.'
-            : info.voiceCount === 0
-              ? 'Keine Stimmen vorhanden: im Browser/TTS-System nachsehen (z. B. Sprachausgabe aktiviert?).'
-              : info.needsGesture
-                ? 'Autoplay-Schutz: einmal auf die Seite klicken.'
-                : 'Sprachausgabe sollte funktionieren.',
+          info.needsGesture
+            ? 'Autoplay-Schutz: einmal auf die Seite klicken.'
+            : info.server && info.server.ready
+              ? 'Lokaler TTS-Server aktiv (Supertonic).'
+              : !info.supported
+                ? 'Browser unterstützt speechSynthesis nicht.'
+                : info.voiceCount === 0
+                  ? 'Keine Stimmen vorhanden: im Browser/TTS-System nachsehen (z. B. Sprachausgabe aktiviert?).'
+                  : info.server && info.server.wanted
+                    ? 'TTS-Server nicht erreichbar – es spricht die Browser-Stimme; ansonsten sollte die Sprachausgabe funktionieren.'
+                    : 'Sprachausgabe sollte funktionieren.',
       };
     },
     /** Test der Wiederholung nach Autoplay-Sperre (siehe speechInfo().needsGesture). */
@@ -1485,6 +1871,11 @@
       inGameAgeMs: state.inGameSince === null ? null : Date.now() - state.inGameSince,
     }),
   };
+
+  // Mit @grant ist window die Sandbox – für die Seitenkonsole hängt das
+  // Debug-Objekt zusätzlich am echten Seitenfenster.
+  window.NestrisHomie = debugApi;
+  if (pageWin !== window) pageWin.NestrisHomie = debugApi;
 
   start();
 })();

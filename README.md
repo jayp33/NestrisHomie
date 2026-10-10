@@ -19,6 +19,7 @@ Zusätzlich kommen Events, wenn sich etwas Wesentliches tut.
 | Beide Punktestände | optional, zusammen mit der Intervallansage |
 | „Du übernimmst die Führung!" / „… Führung abgegeben" | sofort beim Führungswechsel |
 | „Der Gegner ist raus!" (Sieg sofort oder Chasedown mit Lücke) | wenn die Gegneranzeige einfriert, während du spielst |
+| Natürliche Stimme über einen lokalen TTS-Server (Supertonic) | optional, Auto-Erkennung; ohne Server übernimmt die Browser-Stimme |
 
 Die genannte **Differenz wird auf ganze Tausender gerundet**, damit die
 Ansprache nicht in Einzelpunkten herumhackt: Vorsprung abwärts, Rückstand
@@ -127,6 +128,11 @@ Danach erscheint unten rechts eine 🎙-Schaltfläche mit dem Einstellungsdialog
 | Sprache | Deutsch | Ansagetexte `de` / `en` |
 | Stimme | Automatisch | konkrete Systemstimme |
 | Tempo / Lautstärke | 1,0 / 1,0 | `SpeechSynthesisUtterance.rate/.volume` |
+| Sprach-Backend | Auto | `Auto` = lokaler TTS-Server, sonst Browser; `Server` erzwingt, `browser` schließt den Server aus |
+| TTS-Server | `http://127.0.0.1:8099` | Basis-URL des audio.cpp-Dienstes |
+| Server-Stimme | `M1` | Supertonic-Stimme des Servers |
+| Abspieltempo WAV (`serverRate`) | 1,2 | nur Server-Backend, per Konsole: `NestrisHomie.setSettings({ serverRate: 1.1 })` |
+| Server-Timeout (`ttsTimeoutSec`) | 4 s | Antwortfrist des Servers, per Konsole änderbar |
 
 Alle Einstellungen liegen lokal in `localStorage` unter
 `nestris-homie.settings.v1` – keine Daten verlassen den Browser.
@@ -160,7 +166,12 @@ nestris.org (Angular-SPA)
 └───────────────────────►│  Sprachausgabe (TTS)  │
                          │  Warteschlange,       │
                          │  Events vor periodisch│
-                         └───────────────────────┘
+                         └──────┬───────┬────────┘
+                                │       │
+                Browser-Stimme  │       │  Server (optional):
+         speechSynthesis.speak()│       │  GM_xmlhttpRequest
+                                ▼       ▼  → 127.0.0.1:8099
+                                       WAV-Blob → <audio>
 ```
 
 Warum **hybrid**? Die JSON-Ereignisse liefern den exakten Matchstatus, den man
@@ -175,6 +186,7 @@ fertig berechneten Score inkl. Differenz an. Details: [docs/protokoll.md](docs/p
 nestris-homie.user.js
 ├─ 1. Einstellungen (localStorage)
 ├─ 2. Sprachausgabe (Warteschlange, Stimmenwahl, Chrome-Watchdog)
+├─ 2a. Lokaler TTS-Server (audio.cpp + Supertonic, optional)
 ├─ 3. Textbausteine + deutsche Zahlwörter
 ├─ 4. WebSocket-Mitschnitt (Proxy + JSON-Dispatcher)
 ├─ 5. DOM-Zugriff (Scores, Namen, Spielstand)
@@ -229,6 +241,7 @@ Hinweis. In der Konsole liefert `NestrisHomie.speechInfo()` dieselben Daten:
 | `lastError` | Letzter Browserfehler, z. B. `not-allowed` (Autoplay-Schutz) oder `no-match` (keine passende Stimme) |
 | `needsGesture` | `true`, solange der Browser die Ausgabe noch blockiert – einmal auf die Seite klicken genügt |
 | `hinweis` | Klartext-Empfehlung für die aktuelle Situation |
+| `server` | Zustand des lokalen TTS-Servers: `ready`, `mode` (`ready`/`failed`), `latencyMs`, `cacheSize`, `failures` (siehe Abschnitt „Sprachausgabe über einen lokalen TTS-Server") |
 
 Die häufigsten Ursachen:
 
@@ -237,8 +250,14 @@ Die häufigsten Ursachen:
    die betroffene Ansage automatisch.
 2. **Keine Stimmen** (`voiceCount: 0`): Das System liefert dem Browser keine
    Text-to-Speech-Stimme. Auf Linux ist das der häufigste Fall – siehe unten.
+   Ohne Server-Backend gibt es hier keine Abhilfe im Skript; mit Server-Backend
+   ist `voiceCount` ohne Belang, entscheidend ist `server.ready`.
 3. **Falsche Stimme/Sprache im Panel**: `no-match` – im Panel Stimme auf
    *Automatisch* stellen oder eine passende wählen.
+4. **Server nicht erreichbar** (`server.wanted: true`, `server.ready: false`):
+   Der audio.cpp-Dienst läuft nicht (oder Port/URL stimmen nicht). NestrisHomie
+   spricht dann still mit der Browser-Stimme weiter; Dienst starten oder das
+   Backend auf *Browser* stellen, um den Hinweis loszuwerden.
 
 ### Sprachausgabe unter Linux
 
@@ -279,6 +298,58 @@ Danach verhalten sich die Browser unterschiedlich:
 Unabhängig vom Browser: `NestrisHomie.speechInfo()` mit `voiceCount > 0`
 prüfen – das ist das Zeichen, dass der Browser überhaupt sprechen kann.
 
+### Sprachausgabe über einen lokalen TTS-Server
+
+Wer den Dienst aus
+[kdeconnect-battery](https://github.com/jayp33/kdeconnect-battery) kennt
+([audio.cpp](https://github.com/0xShug0/audio.cpp) + **Supertonic 3**,
+`kdeconnect-tts.service` auf Port 8099), kann denselben Server auch für
+NestrisHomie nutzen – Installation und Modell liegen bereits vor, NestrisHomie
+braucht nichts Neues auf der Platte. Die Klangqualität liegt Welten über
+`espeak-ng`, und `--enable-speech-dispatcher` ist dann nicht mehr nötig.
+
+Gemessene Syntheselatenz für unsere typischen Sätze (CPU, Modell resident):
+**rund 1,3–1,5 Sekunden** für 3–5 Sekunden Audio – machbar, weil die Sätze
+kurz sind und die Warteschlange (`eventGapSec: 6`) Staus verhindert.
+
+So verhält sich das Backend:
+
+* **Auto-Erkennung (Standard `ttsBackend: 'auto'`):** beim Laden wird
+  `GET /health` geprüft; antwortet der Dienst mit `"status":"ok"`, spricht
+  Server. Ein gerade erst startender Dienst bekommt drei Anläufe (der Port
+  öffnet sich erst nach dem Modellladen, gemessen bei ~4,8 s).
+* **Mixed Content Umgehung:** nestris.org ist HTTPS, der Server HTTP. Ein
+  normales `fetch()` würde der Browser blockieren, deshalb läuft jeder
+  Zugriff privilegiert über `GM_xmlhttpRequest` (`@connect 127.0.0.1`).
+  Deshalb braucht das Skript jetzt Tampermonkey mit Grants – wer es ohne
+  Tampermonkey betreibt, verliert automatisch die Server-Option, die
+  Browser-Stimme bleibt unverändert.
+* **Circuit Breaker:** scheitern zwei Ansagen in Folge (Timeout, HTTP-Fehler),
+  übernimmt für die Sitzung die Browser-Stimme; `speechInfo().server`
+  meldet `mode: 'failed'`.
+* **Cache:** synthetisierte WAVs liegen im Speicher (Schlüssel: Stimme,
+  Sprache, Text). Unsere Texte wiederholen sich stark (gerundete
+  Tausenderdifferenzen), Wiederholungen sind deshalb sofort zu hören.
+* **Unterbrechung:** Events verdrängen Intervallansagen wie bisher; eine
+  bereits gestartete WAV wird gestoppt, eine laufende Synthese kann der
+  Server nicht abbrechen – ihr Ergebnis wird verworfen, bevor es zu hören
+  wäre.
+* **Autoplay-Sperre** meldet sich wie bei der Browser-Stimme als
+  `needsGesture` und wird nach einem Klick wiederholt.
+
+Prüfen und Diagnose:
+
+```js
+NestrisHomie.speechInfo().server   // {mode, ready, wanted, failures, latencyMs, cacheSize}
+NestrisHomie.setSettings({ ttsBackend: 'browser' })   // bewusst abschalten
+```
+
+Die Stimme (`M1` … `M6`, ggf. `F*`) und das Abspieltempo (`serverRate`,
+Standard 1,2) lassen sich im Panel bzw. per Konsole wählen. Lizenzen: audio.cpp
+Apache-2.0, Supertonic 3 BigScience OpenRAIL-M – beide werden wie in der
+kdeconnect-Doku beschrieben getrennt installiert und nicht mit NestrisHomie
+ausgeliefert.
+
 ## Einschränkungen
 
 * Die Selektoren richten sich an der aktuellen nestris.org-Oberfläche. Ändert
@@ -288,3 +359,7 @@ prüfen – das ist das Zeichen, dass der Browser überhaupt sprechen kann.
   WebSocket-Nachrichten und verändert den Spielverlauf nicht.
 * Der Statusfallback ohne WebSocket (`guessStatusFromDom`) greift nur, wenn der
   Mitschnitt nicht aktiv ist – in dem Fall Seite neu laden.
+* Die Server-Option braucht Tampermonkey (Grants `GM_xmlhttpRequest` und
+  `unsafeWindow`). Läuft das Skript ohne Grants in einem anderen
+  Userscript-Manager, spricht automatisch die Browser-Stimme; der
+  WebSocket-Mitschnitt greift dann auf `window` statt `unsafeWindow` zurück.

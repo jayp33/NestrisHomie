@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.3.0
+// @version      0.4.0
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
-//               plus Events (Spielstart, Führungswechsel, Spiel-/Matchende, Trophäen).
+//               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
+//               Spiel-/Matchende, Trophäen).
 // @author       NestrisHomie
 // @match        https://nestris.org/*
 // @run-at       document-start
@@ -49,6 +50,8 @@
     announceSeries: false,    // Spielstand (Siege) mit ansagen
     announceLeadChange: true, // sofort ansagen, wenn sich die Führung dreht
     announceStartEnd: true,   // Spielstart, Spielende, Matchende, Trophäen
+    announceTopout: true,     // Chasedown/Sieg, sobald der Gegner topoutet
+    topoutSec: 5,             // Stillstand der Gegneranzeige, der als Topout gilt
     eventGapSec: 6,           // Mindestabstand zwischen Event-Ansagen
   };
 
@@ -388,6 +391,11 @@
       leadTakenKnapp: () => 'Du übernimmst knapp die Führung!',
       leadLost: () => 'Du hast die Führung abgegeben.',
       leadLostKnapp: () => 'Du hast die Führung knapp abgegeben.',
+      opponentOutPrefix: () => 'Gegner ist raus.',
+      opponentOutWin: () => 'Der Gegner ist raus! Du gewinnst das Spiel.',
+      opponentOutChase: (gap) => `Der Gegner ist raus! Du musst noch ${fmt(gap)} Punkte aufholen.`,
+      opponentOutTie: () => 'Der Gegner ist raus! Gleichstand, du musst ihn noch überholen.',
+      opponentOutGeneric: () => 'Der Gegner ist raus!',
       gameWon: (me, opp) => `Spiel gewonnen. ${fmt(me)} zu ${fmt(opp)} Punkten.`,
       gameLost: (me, opp) => `Spiel verloren. ${fmt(opp)} zu ${fmt(me)} Punkte.`,
       gameTied: (me) => `Spiel unentschieden bei ${fmt(me)} Punkten.`,
@@ -413,6 +421,11 @@
       leadTakenKnapp: () => 'You narrowly take the lead!',
       leadLost: () => 'You lost the lead.',
       leadLostKnapp: () => 'You narrowly lost the lead.',
+      opponentOutPrefix: () => 'Opponent is out.',
+      opponentOutWin: () => 'The opponent is out! You win the game.',
+      opponentOutChase: (gap) => `The opponent is out! You need ${fmt(gap)} more points to catch up.`,
+      opponentOutTie: () => 'The opponent is out! Tied, you still have to pass them.',
+      opponentOutGeneric: () => 'The opponent is out!',
       gameWon: (me, opp) => `Game won, ${fmt(me)} to ${fmt(opp)}.`,
       gameLost: (me, opp) => `Game lost, ${fmt(opp)} to ${fmt(me)}.`,
       gameTied: (me) => `Game tied at ${fmt(me)}.`,
@@ -595,6 +608,95 @@
     };
   }
 
+  /* --- Lebenszeichen einer Spielseite (Chasedown-Erkennung) -------------- */
+
+  /** Billiger String-Hash – nur zum Erkennen von Änderungen. */
+  function fnv(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i += 1) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(36);
+  }
+
+  /** Pixel-Hash eines Canvas; null, wenn nicht lesbar (z. B. fremde Quelle). */
+  function canvasHash(canvas) {
+    try {
+      const ctx = typeof canvas.getContext === 'function' ? canvas.getContext('2d') : null;
+      if (!ctx || typeof ctx.getImageData !== 'function') return null;
+      const w = canvas.width || 0;
+      const h = canvas.height || 0;
+      if (!w || !h) return null;
+      const data = ctx.getImageData(0, 0, w, h).data;
+      let hash = 0x811c9dc5;
+      for (let i = 0; i < data.length; i += 8) {
+        hash ^= data[i];
+        hash = Math.imul(hash, 0x01000193);
+      }
+      const out = (hash >>> 0).toString(36);
+      return out || null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
+   * Signatur einer Spielseite: alle Werte, die sich nur ändern, wenn dieser
+   * Spieler noch spielt (Score, Level, Lines, DRT/QUAD, Next Piece, Board).
+   * h1.diff bleibt bewusst draußen – der ändert sich auch, wenn der ANDERE
+   * gerade punktet.
+   *
+   * Rückgabe: {value, fast}. "fast" heißt: mindestens ein Signal, das sich
+   * während des Spiels regelmäßig ändert (Board-Pixel, Next Piece,
+   * Drought-Counter). Nur darauf ist Verlass – Score und Lines allein können
+   * bei einer Dürre lange stehen, ohne dass jemand tot ist.
+   */
+  function sideSignature(side) {
+    if (!side) return null;
+    const parts = [];
+    let fast = false;
+
+    side.querySelectorAll('app-nes-panel').forEach((panel) => {
+      const labelEl = panel.querySelector('p');
+      const label = labelEl ? labelEl.textContent.trim() : '';
+      const texts = [];
+      panel.querySelectorAll('h1').forEach((el) => {
+        if (el.classList.contains('diff')) return;
+        texts.push(el.textContent.trim());
+      });
+      panel.querySelectorAll('h2').forEach((el) => texts.push(el.textContent.trim()));
+
+      const piece = qs(panel, 'app-nes-piece');
+      if (piece) {
+        const pieceCanvas = qs(piece, 'canvas');
+        const markup = piece.innerHTML || piece.textContent || '';
+        const hash = pieceCanvas ? canvasHash(pieceCanvas) : markup ? fnv(markup) : null;
+        if (hash) {
+          texts.push('piece=' + hash);
+          fast = true; // Next Piece wechselt mit jedem Spawn
+        }
+      }
+      // DRT/QUAD-Panel: der Drought-Counter zählt jeden Spawn mit.
+      if (label === 'DRT' || label === 'QUAD') fast = true;
+      if (texts.length) parts.push(label + '=' + texts.join('/'));
+    });
+
+    const board = qs(side, 'app-nes-board');
+    if (board) {
+      const canvas = qs(board, 'canvas');
+      const markup = board.innerHTML || '';
+      const hash = canvas ? canvasHash(canvas) : markup ? fnv(markup) : null;
+      if (hash) {
+        parts.push('board=' + hash);
+        fast = true; // Minos/aktives Piece ändern sich im Spiel ständig
+      }
+    }
+
+    if (!parts.length) return null;
+    return { value: parts.join('|'), fast };
+  }
+
   /* ============================================================
    * 6. Matchzustand
    * ============================================================ */
@@ -619,6 +721,13 @@
     lastEventAt: 0,
     pendingTrophy: null,
     periodicTimer: null,
+    // Chasedown-Wächter: Lebenszeichen beider Seiten (siehe watchTopout)
+    oppSig: null,            // Signatur der Gegneranzeige
+    oppSigAt: null,          // Zeitpunkt ihrer letzten Änderung
+    oppFast: false,          // schnelles Signal vorhanden (Board/Piece/DRT)
+    meSig: null,             // dasselbe für die eigene Seite
+    meSigAt: null,
+    opponentOut: false,      // einmal pro Spiel: der Gegner ist raus
   };
 
   function isPlaying() {
@@ -673,6 +782,7 @@
       state.inGameSince = Date.now();
       state.endedAt = null;
       state.lastSign = 0;
+      resetTopoutWatch();
       state.scores = readScores();
       schedulePeriodic(settings.intervalSec * 1000);
       if (settings.announceStartEnd && prev !== STATUS.IN_GAME) {
@@ -709,6 +819,7 @@
     state.inGameSince = null;
     state.endedAt = null;
     state.pendingTrophy = null;
+    resetTopoutWatch();
     TTS.clearPending('periodic');
     // Laufende Ansagen bewusst NICHT abbrechen: Das Ergebnis eines gerade
     // beendeten Matches soll noch zu Ende gesprochen werden.
@@ -754,6 +865,12 @@
       // Rückstand aufwärts gerundet – 1 Punkt heißt schon "eintausend".
       text = t('behind', roundDeficitUp(-s.diff));
     } else text = t('tied', s.myScore ?? 0);
+
+    // Während des Chasedowns den Kontext mitliefern: jetzt zählt nur noch
+    // der eigene Score.
+    if (state.opponentOut && settings.announceTopout) {
+      text = t('opponentOutPrefix') + ' ' + text;
+    }
 
     if (settings.announceScores && s.myScore !== null && s.oppScore !== null) {
       text += ' ' + t('scores', s.myScore, s.oppScore, s.oppName);
@@ -824,6 +941,12 @@
     const sign = s.diff > 0 ? 1 : s.diff < 0 ? -1 : 0;
     const prev = state.lastSign;
     state.lastSign = sign;
+    // Chasedown: Gleichstand/Rückstand -> Vorsprung gegen einen gestorbenen
+    // Gegner heißt der sichere Sieg (Scores können nicht mehr fallen).
+    if (state.opponentOut && sign > 0 && prev <= 0) {
+      emitEvent(t('opponentOutWin'), { interrupt: true, requireGap: false });
+      return;
+    }
     // 0 = Gleichstand: kein echter Führungswechsel, nicht ansagen.
     if (sign === 0 || prev === 0 || sign === prev) return;
     if (!settings.announceLeadChange) return;
@@ -832,6 +955,88 @@
     } else {
       emitEvent(t(isNarrowLead(s.diff) ? 'leadLostKnapp' : 'leadLost'));
     }
+  }
+
+  /* --- Chasedown / früher Sieg (Gegner-Topout) --------------------------- */
+
+  function resetTopoutWatch() {
+    state.oppSig = null;
+    state.oppSigAt = null;
+    state.oppFast = false;
+    state.meSig = null;
+    state.meSigAt = null;
+    state.opponentOut = false;
+  }
+
+  /** Signatur einer Seite merken; merkt sich den Zeitpunkt der Änderung. */
+  function trackSignature(selector, who) {
+    const sig = sideSignature(document.querySelector(selector));
+    if (!sig) return;
+    const sigKey = who === 'opp' ? 'oppSig' : 'meSig';
+    const atKey = who === 'opp' ? 'oppSigAt' : 'meSigAt';
+    if (state[sigKey] === null) state[sigKey] = sig.value;
+    else if (state[sigKey] !== sig.value) {
+      state[sigKey] = sig.value;
+      state[atKey] = Date.now();
+    }
+    if (who === 'opp' && sig.fast) state.oppFast = true;
+  }
+
+  /**
+   * Chasedown-Erkennung: Solange ein Spieler noch spielt, ändern sich seine
+   * Anzeigedaten ständig (Board, Next Piece, Drought-Counter, Score, Lines).
+   * Nach einem Topout friert die ganze Seite ein – nestris.org meldet das
+   * vor Spielende aber nicht (Victory/Defeat kommt erst, wenn beide raus
+   * sind, siehe docs/protokoll.md). Wir messen deshalb den Stillstand:
+   * gefriert die Gegneranzeige, während die eigene weiterläuft, ist der
+   * Gegner raus.
+   */
+  function watchTopout() {
+    if (!settings.announceTopout) {
+      state.opponentOut = false;
+      return;
+    }
+    if (!isPlaying() || state.opponentOut) return;
+
+    const now = Date.now();
+    trackSignature(DOM_SEL.sideOpponent, 'opp');
+    trackSignature(DOM_SEL.sideMe, 'me');
+
+    // "LEFT ROOM"/Abort ist ein anderer Fall: der Server bricht das Match ab.
+    const oppBoardText = qs(document.querySelector(DOM_SEL.sideOpponent), DOM_SEL.countdown);
+    const boardText = oppBoardText ? oppBoardText.textContent : '';
+    if (boardText && /LEFT ROOM|Aborting/i.test(boardText)) return;
+
+    const topoutMs = Math.max(3, Number(settings.topoutSec) || 5) * 1000;
+    // Start-Countdown überspringen: vorher kann niemand topouten, und die
+    // Daten laufen dort ohnehin noch (oder haben noch gar nicht angefangen).
+    const graceMs = Math.min(Math.max(6000, topoutMs * 2), 15000);
+    if (!state.inGameSince || now - state.inGameSince < graceMs) return;
+    if (!state.oppFast) return; // nur langsame Signale: zu unsicher für ein "raus"
+    if (state.oppSigAt === null) return; // noch keine Änderung beobachtet
+    if (now - state.oppSigAt < topoutMs) return;
+    // Die eigene Seite muss weiterlaufen – bin ich selbst tot, kündigt das
+    // Spielende die Statusmaschine an, nicht diese Heuristik.
+    if (state.meSigAt === null || now - state.meSigAt >= topoutMs) return;
+
+    declareOpponentOut();
+  }
+
+  /** Der Gegner ist raus: Sieg ansagen (wenn ich führe) oder Chasedown. */
+  function declareOpponentOut() {
+    state.opponentOut = true;
+    const s = state.scores || readScores();
+    const diff = s ? s.diff : null;
+    // Rückstand wird wie überall aufwärts gerundet – nie zu klein nennen.
+    const text =
+      typeof diff !== 'number'
+        ? t('opponentOutGeneric')
+        : diff > 0
+          ? t('opponentOutWin')
+          : diff < 0
+            ? t('opponentOutChase', roundDeficitUp(-diff))
+            : t('opponentOutTie');
+    emitEvent(text, { interrupt: true, requireGap: false });
   }
 
   /* ============================================================
@@ -902,6 +1107,9 @@
       <label class="row"><span>Punktestände ansagen</span><input type="checkbox" data-key="announceScores"></label>
       <label class="row"><span>Führungswechsel ansagen</span><input type="checkbox" data-key="announceLeadChange"></label>
       <label class="row"><span>Spielstart / -ende</span><input type="checkbox" data-key="announceStartEnd"></label>
+      <label class="row"><span>Chasedown / Sieg ansagen</span><input type="checkbox" data-key="announceTopout"></label>
+      <label class="row"><span>Topout erkennen nach</span>
+        <input type="number" min="3" max="60" step="1" data-key="topoutSec"> Sek. Stillstand</label>
       <label class="row"><span>Spielstand ansagen</span><input type="checkbox" data-key="announceSeries"></label>
       <label class="row"><span>Sprache</span>
         <select data-key="language">
@@ -1069,6 +1277,7 @@
     const s = readScores();
     state.scores = s;
     if (s) handleLeadChange(s);
+    watchTopout();
     updateStatusLine();
   }
 
@@ -1108,9 +1317,10 @@
       return;
     }
     const diff = s.diff === null ? '–' : (s.diff > 0 ? '+' : '') + s.diff;
+    const out = state.opponentOut ? ' · Gegner raus' : '';
     ui.updateStatus(
       `Status: ${state.status || '–'} · ${role}\n` +
-        `Du: ${s.myScore ?? '–'} · Gegner: ${s.oppScore ?? '–'} · Differenz: ${diff}\n` +
+        `Du: ${s.myScore ?? '–'} · Gegner: ${s.oppScore ?? '–'} · Differenz: ${diff}${out}\n` +
         speechStatusText(),
     );
   }
@@ -1258,6 +1468,22 @@
     },
     /** Test der Wiederholung nach Autoplay-Sperre (siehe speechInfo().needsGesture). */
     retryFailedSpeech: () => TTS.retryFailed(),
+    /**
+     * Chasedown-Diagnose für die Browserkonsole:
+     *   NestrisHomie.topoutInfo()
+     * Zeigt, wie alt die Lebenszeichen beider Seiten sind, ob ein schnelles
+     * Signal (Board/Next Piece/DRT) erkannt wurde und ob der Gegner bereits
+     * als raus gemeldet ist.
+     */
+    topoutInfo: () => ({
+      opponentOut: state.opponentOut,
+      active: settings.announceTopout && isPlaying(),
+      thresholdSec: settings.topoutSec,
+      oppAgeMs: state.oppSigAt === null ? null : Date.now() - state.oppSigAt,
+      meAgeMs: state.meSigAt === null ? null : Date.now() - state.meSigAt,
+      oppFast: state.oppFast,
+      inGameAgeMs: state.inGameSince === null ? null : Date.now() - state.inGameSince,
+    }),
   };
 
   start();

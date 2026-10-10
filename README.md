@@ -18,6 +18,7 @@ Zusätzlich kommen Events, wenn sich etwas Wesentliches tut.
 | Vorsprung / Gleichstand / Rückstand (+ Differenz) | alle 30 s (Intervall frei wählbar) |
 | Beide Punktestände | optional, zusammen mit der Intervallansage |
 | „Du übernimmst die Führung!" / „… Führung abgegeben" | sofort beim Führungswechsel |
+| „Der Gegner ist raus!" (Sieg sofort oder Chasedown mit Lücke) | wenn die Gegneranzeige einfriert, während du spielst |
 
 Die genannte **Differenz wird auf ganze Tausender gerundet**, damit die
 Ansprache nicht in Einzelpunkten herumhackt: Vorsprung abwärts, Rückstand
@@ -50,6 +51,47 @@ Ein Führungswechsel unter 1000 Punkten klingt entsprechend abgeschwächt:
 „Du übernimmst knapp die Führung!" bzw. „Du hast die Führung knapp
 abgegeben." Absolute Punktestände (die optionalen) bleiben ungerundet –
 dort zählt der genaue Wert.
+
+### Chasedown / früher Sieg
+
+nestris.org zeigt Victory/Defeat erst, wenn **beide** Spieler raus sind –
+ein Topout des Gegners wird vorher nirgends gemeldet (siehe
+`docs/protokoll.md`). NestrisHomie erkennt es deshalb selbst: Solange ein
+Spieler noch spielt, ändern sich seine Anzeigedaten ständig (Board-Minos,
+Next Piece, Drought-Counter, Score, Lines). Nach dem Topout friert die
+ganze Gegnerseite ein, während deine weiterläuft. Das ist der Moment, in
+dem die Assistentin „Der Gegner ist raus!" ruft:
+
+| Situation | Angesagt |
+| --- | --- |
+| Du führst | „Der Gegner ist raus! Du gewinnst das Spiel." (Sieg ist dann sicher) |
+| Du liegst zurück | „Der Gegner ist raus! Du musst noch … Punkte aufholen." (Lücke aufgerundet) |
+| Gleichstand | „Der Gegner ist raus! Gleichstand, du musst ihn noch überholen." |
+
+Danach liefern die Intervallansagen das Präfix „Gegner ist raus." mit, und
+sobald du im Chasedown die Führung übernimmst, wird der Sieg bestätigt.
+
+Details und Hürden der Erkennung:
+
+* Grundlage sind nur **schnelle Signale** (Board-Pixel, Next Piece,
+  Drought-Counter) – reine Score-/Lines-Stillstände reichen nicht, denn bei
+  einer Dürre ändern die sich legitimerweise langsam.
+* Ein **Start-Grace** (6–15 s, je nach Schwelle) überspringt den
+  Spielstart-Countdown; früher kann niemand topouten.
+* Ist die eigene Seite ebenfalls eingefroren (ich bin selbst tot), wird
+  nichts gemeldet – dann entscheidet das normale Spielende.
+* „LEFT ROOM" (Gegner hat den Raum verlassen) wird nicht als Topout gewertet.
+* Die Schwelle „Topout erkennen nach" (Standard 5 Sek.) lässt sich bei
+  wackligen Verbindungen erhöhen.
+
+Diagnose in der Browserkonsole: `NestrisHomie.topoutInfo()` zeigt das Alter
+beider Lebenszeichen, ob ein schnelles Signal erkannt wurde und ob der
+Gegner bereits als raus gemeldet ist.
+
+### Events
+
+| Event | Auslöser |
+| --- | --- |
 | Spielstart (inkl. Gegnername) | bei Statuswechsel auf `IN_GAME` |
 | Spielergebnis (Sieg / Niederlage / Remis mit Endstand) | wenn ein Spiel im Match endet |
 | Matchergebnis + Spielstand (z. B. „zwei zu eins") | bei `AFTER_MATCH` |
@@ -79,6 +121,8 @@ Danach erscheint unten rechts eine 🎙-Schaltfläche mit dem Einstellungsdialog
 | Punktestände ansagen | an | absolute Scores zusätzlich zur Differenz |
 | Führungswechsel ansagen | an | sofortige Meldung bei Führungswechsel |
 | Spielstart / -ende | an | Start, Spielergebnis, Matchende, Trophäen |
+| Chasedown / Sieg ansagen | an | „Gegner ist raus!" beim Topout des Gegners |
+| Topout erkennen nach | 5 Sek. | Stillstand der Gegneranzeige, der als Topout gilt (3–60 s) |
 | Spielstand ansagen | aus | Siege-Serie in der Intervallansage |
 | Sprache | Deutsch | Ansagetexte `de` / `en` |
 | Stimme | Automatisch | konkrete Systemstimme |
@@ -169,6 +213,7 @@ NestrisHomie.say('Test')            // sofort sprechen
 NestrisHomie.setSettings({ intervalSec: 20 })
 NestrisHomie.speechInfo()           // Sprach-Diagnose (siehe unten)
 NestrisHomie.retryFailedSpeech()    // nach Klick gescheiterte Ansage wiederholen
+NestrisHomie.topoutInfo()           // Chasedown-Diagnose (Lebenszeichen beider Seiten)
 ```
 
 ### Wenn keine Sprache zu hören ist

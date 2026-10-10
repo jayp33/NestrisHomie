@@ -78,7 +78,34 @@ wonByResignation bool
 im Frontend (`count(winner === myIndex)`, Remis zählt 0.5 für beide).
 Der eigene Index ergibt sich über den Vergleich des Usernamens mit dem DOM.
 
-### 2.3 Binärprotokoll (nur zur Vollständigkeit)
+### 2.3 Kein vorzeitiges Topout-Signal (Chasedown)
+
+Es gibt **keine JSON-Nachricht**, mit der der Server meldet, dass ein Spieler
+ge-topoutet hat, während das Match noch läuft. Belegt durch das Bundle:
+
+* `getGameOverMode(state, playerIndex)` liefert `WIN`/`LOSE`/`TIE` **nur** bei
+  `status === BEFORE_GAME` (über `lastGameWinner`) bzw. `AFTER_MATCH` (über
+  `matchWinner`) – genau das Victory/Defeat-Overlay, das erst erscheint, wenn
+  beide Spieler raus sind.
+* `lastGameWinner` wird zusammen mit dem Statuswechsel `IN_GAME → BEFORE_GAME`
+  gesetzt, nicht beim Topout eines einzelnen Spielers.
+* `onTopout$` (Emulator) feuert nur für den **eigenen** Topout und ohne
+  Room-Event – der Client seinen Tod also gar nicht selbst an den Server.
+* Beim Statuswechsel zu `BEFORE_GAME` ruft die Seite `emulator.stopGame(true)`
+  auf: Das eigene Spiel endet erst, wenn der Server entschieden hat.
+
+**Zuverlässiger Anhaltspunkt ist deshalb der Binärstrom pro Spieler:**
+`GAME_END` (Opcode 3) setzt `previousSnapshot = state.getSnapshot()` und
+`state = null`. Danach stehen alle Werte der betroffenen Seite still –
+Score, Level, Lines, `next`, `tetrisRate`, `droughtCount`, und das
+Board-Canvas zeigt die Endposition. Aus genau diesem Freeze leitet das
+Userscript den Chasedown ab (siehe Abschnitt 4).
+
+Zusätzlich gemerkt: `players[i].leftRoom` → `showBoardText()` rendert
+„LEFT ROOM" (über das `h1.countdown` der jeweiligen Seite). Ein
+Raumverlassen ist **kein** Topout und wird von der Erkennung unterdrückt.
+
+### 2.4 Binärprotokoll (nur zur Vollständigkeit)
 
 Opcodes (`opcode` = Bitfeld vor dem Paketinhalt):
 
@@ -169,7 +196,13 @@ Daraus lässt sich der Spielstatus ohne WebSocket grob rekonstruieren
    (`BEFORE_GAME → IN_GAME → BEFORE_GAME|AFTER_MATCH|ABORTED`).
 3. **Alle 400 ms** werden die Scores aus `.side.me` bzw. `.side.opponent`
    gelesen; Differenz und Führungswechsel werden daraus abgeleitet.
-4. **Sprachausgabe** über die Web Speech API mit einer Warteschlange
+4. **Chasedown-Erkennung** (ebenfalls alle 400 ms): Pro Seite wird eine
+   Signatur aus den `app-nes-panel`-Werten (ohne `h1.diff`), den Board-Pixeln
+   und dem Next-Piece-Element gebildet. Gefriert die Gegnerseite länger als
+   `topoutSec`, während die eigene weiterläuft und mindestens ein „schnelles"
+   Signal (Board/DRT/Next Piece) vorhanden ist, gilt der Gegner als raus –
+   es folgt die Sieges- oder Chasedown-Ansage (siehe Abschnitt 2.3).
+5. **Sprachausgabe** über die Web Speech API mit einer Warteschlange
    (periodische Ansagen können verdrängt werden, Events haben Vorrang).
 
 ## 5. Wartung / Was bei Änderungen zu prüfen ist
@@ -183,6 +216,7 @@ Nach einem Redeploy von nestris.org gilt:
    NestrisHomie.readScores()      // {myScore, oppScore, diff, myName, oppName, …}
    NestrisHomie.state             // roomStatus, status, scores …
    NestrisHomie.previewAnnouncement()
+   NestrisHomie.topoutInfo()      // Lebenszeichen f. die Chasedown-Erkennung
    ```
 4. Falls die JSON-Typen sich ändern: im Bundle nach `t.PING="ping"` suchen –
    dort steht die vollständige Enum-Liste.

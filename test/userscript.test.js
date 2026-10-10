@@ -9,6 +9,8 @@
  *   4. readScores() liest Scores/Differenz/Namen korrekt aus dem DOM
  *   5. previewAnnouncement() liefert den erwarteten deutschen Text
  *   6. Führungswechsel wird erkannt und angesagt
+ *   6c. Chasedown: Gefriert die Gegneranzeige während das eigene Spiel
+ *       weiterläuft, wird "Der Gegner ist raus!" angesagt (Sieg bzw. Lücke)
  *   7. AFTER_MATCH erzeugt die Match-Ende-Ansage (über den Spielstand)
  *   8. trophy_change wird angesagt
  *
@@ -226,6 +228,18 @@ function scorePanel(score, diff) {
   ]);
 }
 
+/**
+ * DRT/QUAD-Panel wie auf der echten Seite (docs/protokoll.md): die
+ * Chasedown-Erkennung braucht ein "schnelles" Signal, das sich pro Spawn
+ * ändert – der Drought-Counter zählt jeden Spawn mit.
+ */
+function droughtPanel(score) {
+  return gameNode('app-nes-panel', ['drought-panel'], [
+    gameNode('p', [], [], 'DRT'),
+    gameNode('h2', [], [], String(Math.abs(score) % 97)),
+  ]);
+}
+
 function setScores(myScore, oppScore) {
   const diff = myScore - oppScore;
   const pad = (n) => String(n).padStart(6, '0');
@@ -237,7 +251,10 @@ function setScores(myScore, oppScore) {
       ]),
       gameNode('div', ['my-game'], [
         gameNode('app-layout-one', [], [
-          gameNode('div', ['panels'], [scorePanel(pad(score), signed(ownDiff))]),
+          gameNode('div', ['panels'], [
+            scorePanel(pad(score), signed(ownDiff)),
+            droughtPanel(score),
+          ]),
         ]),
       ]),
     ]);
@@ -471,6 +488,93 @@ async function run() {
     spoken.some((s) => s.includes('knapp die Führung')),
     JSON.stringify(spoken),
   );
+
+  console.log('5c. Chasedown: Gefriert die Gegneranzeige?');
+  api.setSettings({ topoutSec: 3, announceTopout: true });
+  spoken.length = 0;
+
+  // Beide Seiten einfrieren: Auch wenn der Gegner stillsteht, darf nichts
+  // angesagt werden, solange die eigene Seite ebenfalls nicht spielt
+  // (z. B. wenn ich selbst schon tot bin – dann entscheidet das Spielende).
+  setScores(90000, 95000);
+  await sleep(4000);
+  check(
+    'kein Alarm, solange beide Seiten stillstehen',
+    !spoken.some((s) => s.includes('raus')),
+    JSON.stringify(spoken),
+  );
+  check('kein Alarm ohne eigene Aktivität', api.state.opponentOut === false);
+
+  // Ich spiele weiter (mein Score steigt), der Gegner ist eingefroren ->
+  // nach topoutSec Sekunden Stillstand ist er raus.
+  for (const mine of [90200, 90400, 90600, 90800]) {
+    setScores(mine, 95000);
+    await sleep(700);
+  }
+  check(
+    'Chasedown angesagt',
+    spoken.some((s) => s.includes('Der Gegner ist raus') && s.includes('aufholen')),
+    JSON.stringify(spoken),
+  );
+  check(
+    'aufzuholende Lücke aufwärts gerundet (4800 -> 5000)',
+    spoken.some((s) => s.includes('fünftausend Punkte aufholen')),
+    JSON.stringify(spoken),
+  );
+  check('Zustand opponentOut gesetzt', api.state.opponentOut === true);
+  check(
+    'Periodikansage liefert den Chasedown-Kontext mit',
+    api.previewAnnouncement().includes('Gegner ist raus'),
+    api.previewAnnouncement(),
+  );
+
+  console.log('5d. Sofortiger Sieg beim Topout des Gegners');
+  // Neues Spiel: der Zustand muss pro Spiel zurückgesetzt sein.
+  socket.fire(
+    JSON.stringify({
+      type: 'room_state_update',
+      state: {
+        type: 'MULTIPLAYER',
+        status: 'BEFORE_GAME',
+        ranked: true,
+        players: [{ username: 'ich' }, { username: 'gegner' }],
+        points: [],
+      },
+    }),
+  );
+  await sleep(120);
+  socket.fire(
+    JSON.stringify({
+      type: 'room_state_update',
+      state: {
+        type: 'MULTIPLAYER',
+        status: 'IN_GAME',
+        ranked: true,
+        players: [{ username: 'ich' }, { username: 'gegner' }],
+        points: [],
+      },
+    }),
+  );
+  await sleep(500);
+  check(
+    'Zustand beim neuen Spiel zurückgesetzt',
+    api.state.opponentOut === false,
+    JSON.stringify({ opponentOut: api.state.opponentOut }),
+  );
+  spoken.length = 0;
+
+  // Grace-Phase (Start-Countdown) mit beiden Seiten aktiv überbrücken,
+  // dann friert nur noch der Gegner ein – und ich führe.
+  for (let i = 0; i < 14; i += 1) {
+    setScores(120400 + i * 400, 110000);
+    await sleep(600);
+  }
+  check(
+    'Sieg sofort angesagt',
+    spoken.some((s) => s.includes('Der Gegner ist raus') && s.includes('gewinnst')),
+    JSON.stringify(spoken),
+  );
+  check('Zustand opponentOut erneut gesetzt', api.state.opponentOut === true);
 
   console.log('6. Matchende');
   setScores(90000, 95000);

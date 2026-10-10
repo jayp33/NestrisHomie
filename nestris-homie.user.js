@@ -77,6 +77,8 @@
     ttsVoice: 'M1',                  // Supertonic-Stimme des Servers
     ttsTimeoutSec: 4,                // Timeout für Server-Anfragen
     serverRate: 1.2,                 // Abspielgeschwindigkeit der WAV-Ansagen
+    // Chat-Nachrichten (Issue #7): 'glhf' bei Matchbeginn, 'gg' bei Matchende
+    announceChat: true,
   };
 
   /** @type {typeof DEFAULTS} */
@@ -1072,6 +1074,8 @@ if (!W.WebSocket.__nestrisHomieHooked) {
           if (typeof ev.data !== 'string') return;
           document.dispatchEvent(new CustomEvent('${WS_EVENT}', { detail: ev.data }));
         });
+        // Socket für Chat-Nachrichten speichern (Issue #7)
+        W.__nestrisHomieSocket = socket;
       } catch (err) {}
       return socket;
     },
@@ -1156,6 +1160,15 @@ guessTimer = setInterval(guessDomStatus, 1000);
 window.addEventListener('beforeunload', () => {
   if (pollTimer) clearInterval(pollTimer);
   if (guessTimer) clearInterval(guessTimer);
+});
+
+// Chat-Nachrichten senden (Issue #7): Sandbox schickt Event, Injektions-Skript sendet via Socket
+document.addEventListener('nestris-homie-send-chat', (ev) => {
+  const msg = ev && ev.detail;
+  if (!msg || !W.__nestrisHomieSocket || W.__nestrisHomieSocket.readyState !== 1) return;
+  try {
+    W.__nestrisHomieSocket.send(JSON.stringify({ type: 'chat', message: msg }));
+  } catch (err) {}
 });
 
 document.dispatchEvent(new CustomEvent('${HOOK_OK_EVENT}', { detail: mode }));
@@ -1270,7 +1283,25 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     });
   }
 
-  /** Sandbox-Fall: Hook in die Seite injizieren, Nachrichten per CustomEvent. */
+  /** Chat-Nachricht senden (Issue #7): funktioniert in beiden Modi.
+   *  - Seitenkontext: direkt über state.socket
+   *  - Injektion: per CustomEvent an injiziertes Skript
+   */
+  function sendChat(message) {
+    if (!settings.announceChat || !message) return;
+    if (state.hook.mode === 'Seitenkontext' && state.socket && state.socket.readyState === 1) {
+      try {
+        state.socket.send(JSON.stringify({ type: 'chat', message }));
+      } catch (err) {
+        console.warn(LOG, 'Chat senden fehlgeschlagen (Seitenkontext)', err);
+      }
+    } else if (state.hook.mode === 'Injektion') {
+      // Injektions-Skript läuft in Seitenwelt und hat Socket-Referenz
+      document.dispatchEvent(new CustomEvent('nestris-homie-send-chat', { detail: message }));
+    }
+  }
+
+  /** Erkennt Sandbox-Welten (für Status/Logs; die Brücke läuft in beiden). */
   function installInjectedHook() {
     const inject = () => {
       const parent = document.documentElement;
@@ -1299,6 +1330,8 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
 
   function attachSocket(socket) {
     socket.addEventListener('message', (event) => handleWsJson(event.data));
+    // Socket-Referenz speichern für Chat-Nachrichten (Issue #7)
+    state.socket = socket;
   }
 
   /* ============================================================
@@ -1533,6 +1566,8 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     // WebSocket-Mitschnitt (Issue #6): wie der Hook installiert wurde und
     // ob je eine Nachricht ankam – für die Statuszeile und die Konsole.
     hook: { mode: '–', installed: false, lastMsgAt: 0 },
+    // Socket-Referenz für Chat-Nachrichten (Issue #7)
+    socket: null,
   };
 
   function isPlaying() {
@@ -1593,6 +1628,8 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       if (settings.announceStartEnd && prev !== STATUS.IN_GAME) {
         emitEvent(t('started', state.scores && state.scores.oppName));
       }
+      // glhf bei Matchbeginn (Issue #7)
+      sendChat('glhf');
       return;
     }
 
@@ -1601,6 +1638,9 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       state.periodicTimer = null;
       TTS.clearPending('periodic');
       state.endedAt = Date.now();
+
+      // gg bei Matchende (Issue #7)
+      sendChat('gg');
 
       if (next === STATUS.AFTER_MATCH) {
         announceMatchEnd(roomState);
@@ -1913,6 +1953,7 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       <label class="row"><span>Führungswechsel ansagen</span><input type="checkbox" data-key="announceLeadChange"></label>
       <label class="row"><span>Spielstart / -ende</span><input type="checkbox" data-key="announceStartEnd"></label>
       <label class="row"><span>Chasedown / Sieg ansagen</span><input type="checkbox" data-key="announceTopout"></label>
+      <label class="row"><span>Chat: glhf / gg</span><input type="checkbox" data-key="announceChat"></label>
       <label class="row"><span>Topout erkennen nach</span>
         <input type="number" min="3" max="60" step="1" data-key="topoutSec"> Sek. Stillstand</label>
       <label class="row"><span>Spielstand ansagen</span><input type="checkbox" data-key="announceSeries"></label>

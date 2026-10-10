@@ -1053,9 +1053,10 @@
     const info = TTS.getInfo();
     if (!info.supported) return 'Sprache: wird vom Browser nicht unterstützt';
     if (info.voiceCount === 0) {
-      // Häufigster Fall: Linux + Chromium-Browser (Vivaldi/Chrome/Brave).
-      // Chromium bindet speech-dispatcher nicht zuverlässig an, Firefox ja.
-      return 'Sprache: KEINE Stimmen gefunden – auf Linux ggf. "speech-dispatcher" installieren (Firefox ist robuster als Chromium-Browser)';
+      // Häufigster Fall: Linux. Chromium-Browser (Vivaldi/Chrome/Brave/Chromium)
+      // haben speech-dispatcher eingebaut, halten die Anbindung aber per Flag
+      // versteckt (siehe README "Sprachausgabe unter Linux").
+      return 'Sprache: KEINE Stimmen gefunden – auf Linux "speech-dispatcher" installieren; Chromium-Browser zusätzlich mit --enable-speech-dispatcher starten';
     }
     const voice = info.voice ? `${info.voice.name} (${info.voice.lang})` : 'Standardstimme';
     let line = `Sprache: ${voice}`;

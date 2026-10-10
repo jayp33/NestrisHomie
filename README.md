@@ -165,7 +165,7 @@ Die häufigsten Ursachen:
 
 ### Sprachausgabe unter Linux
 
-Linux-Browser haben auf Linux kein eigenes Sprachmodul, sondern binden an
+Linux-Browser haben kein eigenes Sprachmodul, sondern binden an
 `speech-dispatcher` (SSIP) an. Ist das nicht installiert, ist `voiceCount: 0` –
 das Skript kann daran nichts ändern, die Stimme fehlt dem Browser schlicht.
 
@@ -173,19 +173,34 @@ das Skript kann daran nichts ändern, die Stimme fehlt dem Browser schlicht.
 # pacman -Q speech-dispatcher || sudo pacman -S speech-dispatcher
 ```
 
-Wichtig für die Browserwahl:
+Danach verhalten sich die Browser unterschiedlich:
 
-* **Firefox** verhandelt sauber mit `speech-dispatcher` und ist auf Linux der
-  robuster Weg.
-* **Chromium-Browser** (Vivaldi, Chrome, Brave) binden `speech-dispatcher` auf
-  Linux **nicht zuverlässig** an – `getVoices()` bleibt oft dauerhaft leer, obwohl
-  `spd-say` im Terminal läuft (bekanntes Chromium-Verhalten, siehe
-  [Chromium #1057775](https://bugs.chromium.org/p/chromium/issues/detail?id=1057775)).
-  Manche Versionen verlangen zusätzlich den Start mit
-  `--enable-speech-dispatcher`; ob das greift, variiert.
+* **Firefox** verhandelt ohne weiteres Zutun mit `speech-dispatcher` und ist
+  damit der unkomplizierte Weg. Nach der Installation einmal neu starten.
+* **Chromium-Browser** (Chromium, Vivaldi, Chrome, Brave) haben die Anbindung
+  zwar eingebaut, halten sie aber per Command-Line-Flag versteckt. Ohne Flag
+  bleibt `getVoices()` leer, auch wenn `spd-say` im Terminal läuft – ein
+  bekanntes Chromium-Verhalten, siehe
+  [Chromium #1057775](https://bugs.chromium.org/p/chromium/issues/detail?id=1057775).
 
-Nach der Installation einmal Firefox neu starten, dann `NestrisHomie.speechInfo()`
-prüfen: `voiceCount > 0` heißt, es kann sprechen.
+  **Getestet (CachyOS, `espeak-ng` als Synthese):** Mit dem Flag spricht
+  Chromium sauber – nur der Browserstart muss das Flag tragen:
+
+  ```bash
+  chromium --enable-speech-dispatcher
+  ```
+
+  Voraussetzung ist ein vollständiger Neustart des Browsers. Für einen
+  dauerhaften Autostart einen Desktop-Eintrag im Benutzerverzeichnis anlegen
+  (`~/.local/share/applications/`, überschreibt den Systemeintrag, kein
+  Eingriff in `/usr` nötig) und dort `Exec=` um das Flag ergänzen:
+
+  ```ini
+  Exec=/usr/bin/chromium --enable-speech-dispatcher %U
+  ```
+
+Unabhängig vom Browser: `NestrisHomie.speechInfo()` mit `voiceCount > 0`
+prüfen – das ist das Zeichen, dass der Browser überhaupt sprechen kann.
 
 ## Einschränkungen
 

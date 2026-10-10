@@ -365,11 +365,13 @@ ausgeliefert.
 
 ## Einschränkungen
 
-* **Bekannter Fehler (Issue #6):** Seit v0.5.0 erkennt die Seite den
-  Spielstart nicht mehr, wenn das Skript aktiv ist – „Detecting game..."
-  bleibt stehen und das Ranked-Match bricht nach ~10 s ab. Ursache noch
-  offen (in einer Sandbox läuft das Skript auf Chromium), Zwischenstand und
-  Testplan: [docs/regression-issue6.md](docs/regression-issue6.md).
+* **Behoben in v0.5.3 (Issue #6):** Seit v0.5.0 erkannte die Seite den
+  Spielstart nicht mehr, wenn das Skript aktiv war – „Detecting game..."
+  blieb stehen und das Ranked-Match brach nach ~10 s ab. **Ursache:** Canvas-
+  Zugriffe (`getImageData`) aus der Sandbox (Isolated World) störten die
+  OCR-/Capture-Pipeline der Seite. **Fix:** Alle DOM/Canvas-Polling-Logik in
+  das injizierte Seiten-Welt-Skript verlagert; die Sandbox empfängt Daten nur
+  noch per `CustomEvent`. Details: [docs/regression-issue6.md](docs/regression-issue6.md).
 * Die Selektoren richten sich an der aktuellen nestris.org-Oberfläche. Ändert
   sich das Frontend, sind vor allem die Konstanten `DOM_SEL` (Abschnitt 5) zu
   prüfen – Anleitung in [docs/protokoll.md](docs/protokoll.md), Abschnitt 5.

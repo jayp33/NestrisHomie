@@ -4,6 +4,8 @@
 Dieser Text hält den Diagnosestand fest, damit die Sache ohne erneutes
 Bisektieren aufgenommen werden kann. Code-Fix bewusst ausstehend.
 
+**Update 2026-10-10 (v0.5.3):** Fix implementiert und getestet. Siehe Abschnitt 9.
+
 Testbedingungen durchgängig: **Chromium (Vivaldi) mit Tampermonkey**,
 nestris.org, Ranglisten-1v1 mit Capture/OCR.
 
@@ -184,3 +186,65 @@ Kandidaten, keiner bewiesen:
 * Seiten-/Protokoll-Notizen: [protokoll.md](protokoll.md)
 * Diagnose im Skript: `state.hook`, `hookStatusText()`,
   `document.documentElement.dataset.nestrisHomie`, Log `Startkontext:`
+
+---
+
+## 9. Fix (v0.5.3, Commit nach `f2b0fbe`)
+
+### Ursache bestätigt
+Der **Canvas-Zugriff aus der Sandbox** war der Auslöser. Im Sandbox-Modus
+(Chromium + Tampermonkey + `@grant GM_xmlhttpRequest`) läuft das Skript in
+einer Isolated World. Der 400-ms-Polling-Zyklus (`pollScores` →
+`sideSignature` → `canvasHash` → `canvas.getContext('2d').getImageData()`)
+erzeugt dabei einen **zweiten 2D-Kontext** auf den Board-Canvasseiten. Das
+stört die `videoCapture`/`OCR`-Pipeline der Seite: sie sieht keine
+`PIECE_DROPPING`-Events mehr, `ocrStatus$` bleibt auf `OCR_BEFORE_GAME`,
+nach ~10 s feuert `ocrTimer$` ein `ABORT` → Match-Abflug.
+
+Beweis: v0.4.0 (`@grant none`) lief im **Seitenkontext** – dort teilt sich das
+Skript den *einzigen* Canvas-Kontext mit der Seite, keine Störung.
+
+### Lösung
+**Allen Seiten-Zugriff (DOM + Canvas) in die injizierte Seiten-Welt verlegen.**
+Die Injektion (`PAGE_HOOK_SNIPPET`) enthielt bereits den WebSocket-Hook; sie
+wurde um den kompletten Polling-Code erweitert:
+
+| Komponente | Wo sie jetzt läuft |
+|------------|-------------------|
+| WebSocket-Hook (`Proxy` um `WebSocket`) | Injektions-Skript (Seitenwelt) |
+| `readScores()` / `sideSignature()` / `canvasHash()` | Injektions-Skript (Seitenwelt) |
+| Chasedown-Erkennung (`watchTopout`) | Injektions-Skript (Seitenwelt) |
+| DOM-Status-Fallback (`guessStatusFromDom`) | Injektions-Skript (Seitenwelt) |
+| CustomEvent-Brücke (`WS_EVENT`, `HOOK_OK_EVENT`) | Injektions-Skript → Sandbox |
+| **Neu:** `PAGE_STATE_EVENT` (Scores, Signaturen, DOM-Status) | Injektions-Skript → Sandbox |
+| Settings, TTS (GM_xmlhttpRequest), Speech-Queue, UI | Sandbox-Hauptskript (unverändert) |
+
+Im Sandbox-Hauptskript (`start()`) werden die Polling-Intervalle **nur noch
+im Seitenkontext-Modus** gestartet:
+
+```js
+if (state.hook.mode === 'Seitenkontext') {
+  setInterval(pollScores, 400);
+  setInterval(guessStatusFromDom, 1000);
+}
+```
+
+Im Injektions-Modus läuft das Polling ausschließlich im Injektions-Skript
+(Seitenwelt), die Sandbox empfängt die Daten per `PAGE_STATE_EVENT`.
+
+### Technische Details
+- `PAGE_HOOK_SNIPPET` wird zur Laufzeit per `buildPageHookSnippet()` gebaut,
+  um Template-Literal-Nesting-Probleme (innere Backticks in `canvasHash` etc.)
+  zu vermeiden.
+- `PAGE_FN_DEFS` (gemeinsame Helper-Funktionen) bleibt als Template-Literal,
+  wird in `PAGE_HOOK_SNIPPET` interpoliert.
+- Test-Abschnitt 12 (`userscript.test.js`) deckt den Injektions-Pfad ab:
+  Sandbox mit `cloneInto` → Injektions-Skript wird in `pageWindow` ausgeführt
+  → `setInterval`/`CustomEvent` funktionieren → `IN_GAME` kommt über Brücke an.
+
+### Ergebnis
+- **Sandbox-Modus (Chromium/Tampermonkey):** Kein Canvas/DOM-Zugriff mehr aus
+  der Sandbox → „Detecting game...“ funktioniert, Match startet normal.
+- **Seitenkontext-Modus (Firefox/Violentmonkey/@grant none):** Unverändert,
+  direktes Polling wie vor v0.5.0.
+- Alle Tests (inkl. Sandbox-Test) laufen grün.

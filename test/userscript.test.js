@@ -949,7 +949,18 @@ async function run() {
       documentStub.addEventListener('nestris-homie-hook-ok', (ev) => {
         hookOkDetail = ev.detail;
       });
-      const pageCtx = { window: pageWindow, document: documentStub, CustomEvent: FakeCustomEvent };
+      const pageCtx = {
+        window: pageWindow,
+        document: documentStub,
+        CustomEvent: FakeCustomEvent,
+        setTimeout,
+        clearTimeout,
+        setInterval,
+        clearInterval,
+      };
+      // Add addEventListener to pageWindow for the injected script's beforeunload handler
+      pageWindow.addEventListener = () => {};
+      pageWindow.removeEventListener = () => {};
       vm.createContext(pageCtx);
       vm.runInContext(injected.textContent, pageCtx);
 

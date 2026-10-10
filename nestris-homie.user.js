@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.5.2
+// @version      0.5.3
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
 //               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
@@ -848,86 +848,322 @@
   }
 
   /* Brücke Sandbox -> Seite (Issue #6): die injizierte Hook-Fassung schickt
-     jede JSON-Nachricht als CustomEvent an das gemeinsame Dokument zurück. */
-  const WS_EVENT = 'nestris-homie-ws';
-  const HOOK_OK_EVENT = 'nestris-homie-hook-ok';
+      jede JSON-Nachricht als CustomEvent an das gemeinsame Dokument zurück.
+      Zusätzlich läuft in der injizierten Version der komplette DOM/Canvas-Polling
+      (Scores, Signaturen, Chasedown-Erkennung), damit im Sandbox-Fall KEIN
+      Seiten-Zugriff aus der Sandbox erfolgt. */
+   const WS_EVENT = 'nestris-homie-ws';
+   const HOOK_OK_EVENT = 'nestris-homie-hook-ok';
+   const PAGE_STATE_EVENT = 'nestris-homie-page-state';
 
-  /** JSON-Nachricht der Seite prüfen und an unsere Handler verteilen. */
-  function handleWsJson(data) {
-    // Binäre Pakete (Spielstand/Board) brauchen wir nicht – dort steckt der
-    // Score in einem bitgenauen Protokoll. Die JSON-Ereignisse reichen uns.
-    if (typeof data !== 'string') return;
-    let msg;
-    try {
-      msg = JSON.parse(data);
-    } catch (err) {
-      return;
+   /** JSON-Nachricht der Seite prüfen und an unsere Handler verteilen. */
+   function handleWsJson(data) {
+     // Binäre Pakete (Spielstand/Board) brauchen wir nicht – dort steckt der
+     // Score in einem bitgenauen Protokoll. Die JSON-Ereignisse reichen uns.
+     if (typeof data !== 'string') return;
+     let msg;
+     try {
+       msg = JSON.parse(data);
+     } catch (err) {
+       return;
+     }
+     if (!msg || typeof msg.type !== 'string') return;
+     state.hook.lastMsgAt = Date.now();
+     dispatch(msg);
+   }
+
+   /* Selbständige Hook-Fassung für die Seite: läuft außerhalb unseres
+      Skriptbereichs und darf deshalb keine Bindungen an unsere Variablen
+      benutzen – nur DOM, window, die Event-Namen und den Welt-Token. Der
+      Token stammt aus unserer Welt: sieht die Seite ihn, laufen wir selbst im
+      Seitenkontext ("Seitenkontext"), sonst ist die Injektion der einzige Weg
+      ("Injektion") – der Modus wird mit dem Hook_OK-Event gemeldet. Der
+      Marker sitzt im get-Trap, nicht per defineProperty: das würde am Proxy
+      vorbei auf dem nativen Seitenkonstruktor landen (Testabschnitt 12). */
+   const CTX_TOKEN = 'nh-' + Math.random().toString(36).slice(2);
+
+   // DOM-Selektoren und Hilfsfunktionen als Strings, die in die Seite injiziert werden
+   const PAGE_DOM_SEL = {
+     sideMe: '.side.me',
+     sideOpponent: '.side.opponent',
+     scorePanel: 'app-nes-panel.score-panel',
+     diff: 'h1.diff',
+     username: 'app-username p',
+     series: 'p.score',
+     countdown: 'h1.countdown',
+   };
+
+   const PAGE_FN_DEFS = `
+function qs(root, selector) {
+  return root && typeof root.querySelector === 'function' ? root.querySelector(selector) : null;
+}
+function parseScoreText(text) {
+  if (!text) return null;
+  const digits = String(text).replace(/[^\\d]/g, '');
+  if (!digits) return null;
+  const v = Number(digits);
+  return Number.isFinite(v) ? v : null;
+}
+function readSideScore(side) {
+  const panel = qs(side, '${PAGE_DOM_SEL.scorePanel}');
+  if (!panel) return null;
+  for (const h of panel.querySelectorAll('h1')) {
+    if (h.classList.contains('diff')) continue;
+    const v = parseScoreText(h.textContent);
+    if (v !== null) return v;
+  }
+  return null;
+}
+function readDiff(side) {
+  const el = qs(side, '${PAGE_DOM_SEL.scorePanel} ${PAGE_DOM_SEL.diff}');
+  if (!el) return null;
+  const text = el.textContent.trim();
+  if (!/^[+-]?\\d+$/.test(text)) return null;
+  return Number.parseInt(text, 10);
+}
+function readUsername(side) {
+  const el = qs(side, '${PAGE_DOM_SEL.username}');
+  if (!el) return null;
+  const name = el.textContent.trim();
+  return name ? name.replace(/\\s*\\(Aborted\\)\\s*$/i, '') : null;
+}
+function readSeries(side) {
+  const el = qs(side, '${PAGE_DOM_SEL.series}');
+  if (!el) return null;
+  const text = el.textContent.trim();
+  if (!/^\\d+(\\.5)?$/.test(text)) return null;
+  return Number.parseFloat(text);
+}
+function readCountdownText() {
+  const el = document.querySelector('${PAGE_DOM_SEL.sideMe} ${PAGE_DOM_SEL.countdown}');
+  return el ? el.textContent.trim() : null;
+}
+function readScores() {
+  const me = document.querySelector('${PAGE_DOM_SEL.sideMe}');
+  if (!me) return null;
+  const opp = document.querySelector('${PAGE_DOM_SEL.sideOpponent}');
+
+  const myScore = readSideScore(me);
+  let oppScore = readSideScore(opp);
+  const diff = readDiff(me);
+
+  if (oppScore === null && myScore !== null && diff !== null) oppScore = myScore - diff;
+
+  return {
+    myScore,
+    oppScore,
+    diff: diff !== null ? diff : myScore !== null && oppScore !== null ? myScore - oppScore : null,
+    myName: readUsername(me),
+    oppName: readUsername(opp),
+    mySeries: readSeries(me),
+    oppSeries: readSeries(opp),
+  };
+}
+function fnv(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i += 1) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+function canvasHash(canvas) {
+  try {
+    const ctx = typeof canvas.getContext === 'function' ? canvas.getContext('2d') : null;
+    if (!ctx || typeof ctx.getImageData !== 'function') return null;
+    const w = canvas.width || 0;
+    const h = canvas.height || 0;
+    if (!w || !h) return null;
+    const data = ctx.getImageData(0, 0, w, h).data;
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < data.length; i += 8) {
+      hash ^= data[i];
+      hash = Math.imul(hash, 0x01000193);
     }
-    if (!msg || typeof msg.type !== 'string') return;
-    state.hook.lastMsgAt = Date.now();
-    dispatch(msg);
+    const out = (hash >>> 0).toString(36);
+    return out || null;
+  } catch (err) {
+    return null;
   }
+}
+function sideSignature(side) {
+  if (!side) return null;
+  const parts = [];
+  let fast = false;
 
-  /* Selbständige Hook-Fassung für die Seite: läuft außerhalb unseres
-     Skriptbereichs und darf deshalb keine Bindungen an unsere Variablen
-     benutzen – nur DOM, window, die Event-Namen und den Welt-Token. Der
-     Token stammt aus unserer Welt: sieht die Seite ihn, laufen wir selbst im
-     Seitenkontext ("Seitenkontext"), sonst ist die Injektion der einzige Weg
-     ("Injektion") – der Modus wird mit dem Hook_OK-Event gemeldet. Der
-     Marker sitzt im get-Trap, nicht per defineProperty: das würde am Proxy
-     vorbei auf dem nativen Seitenkonstruktor landen (Testabschnitt 12). */
-  const CTX_TOKEN = 'nh-' + Math.random().toString(36).slice(2);
-
-  const PAGE_HOOK_SNIPPET = `(() => {
-  const W = window;
-  if (!W.WebSocket) return;
-  const sameWorld = W.__nestrisHomieCtx === '${CTX_TOKEN}';
-  if (sameWorld) {
-    try { delete W.__nestrisHomieCtx; } catch (err) {}
-  }
-  const mode = sameWorld ? 'Seitenkontext' : 'Injektion';
-  if (!W.WebSocket.__nestrisHomieHooked) {
-    const Native = W.WebSocket;
-    const hooked = new Proxy(Native, {
-      construct(target, args) {
-        const socket = new target(...args);
-        try {
-          socket.addEventListener('message', (ev) => {
-            if (typeof ev.data !== 'string') return;
-            document.dispatchEvent(new CustomEvent('${WS_EVENT}', { detail: ev.data }));
-          });
-        } catch (err) {}
-        return socket;
-      },
-      get(target, prop, receiver) {
-        if (prop === '__nestrisHomieHooked') return true;
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
+  side.querySelectorAll('app-nes-panel').forEach((panel) => {
+    const labelEl = panel.querySelector('p');
+    const label = labelEl ? labelEl.textContent.trim() : '';
+    const texts = [];
+    panel.querySelectorAll('h1').forEach((el) => {
+      if (el.classList.contains('diff')) return;
+      texts.push(el.textContent.trim());
     });
-    W.WebSocket = hooked;
-  }
-  document.dispatchEvent(new CustomEvent('${HOOK_OK_EVENT}', { detail: mode }));
-})();`;
+    panel.querySelectorAll('h2').forEach((el) => texts.push(el.textContent.trim()));
 
-  /**
-   * Hängt sich an den WebSocket der Seite, ohne die Kommunikation anzutasten.
-   * Muss vor dem Seitenaufruf installiert werden (@run-at document-start).
-   *
-   * Zwei Wege, die beide immer laufen (Issue #6 – Regression "Detecting
-   * game..." seit v0.5.0):
-   *  - Direkt: im Seitenkontext (@sandbox raw, wie bis v0.4.0 mit
-   *    @grant none) hängt der Proxy sofort an window.WebSocket. Läuft eine
-   *    Sandbox, bleibt dieser Eingriff auf unsere eigene Welt begrenzt und
-   *    berührt die Seite nicht.
-   *  - Injektion: ein Inline-Skript hakt den Konstruktor in der Seite um und
-   *    schickt die Nachrichten per CustomEvent zurück. Im Seitenkontext
-   *    erkennt es unseren Welt-Token und läuft nicht doppelt (Marker);
-   *    sandboxt der Manager, ist die Injektion der einzige sichere Weg.
-   *    nestris.org hat keine Content-Security-Policy (geprüft); scheitert
-   *    die Injektion, bleibt die Seite unberührt und die Statuszeile weist
-   *    den Mitschnitt als inaktiv aus.
-   */
+    const piece = qs(panel, 'app-nes-piece');
+    if (piece) {
+      const pieceCanvas = qs(piece, 'canvas');
+      const markup = piece.innerHTML || piece.textContent || '';
+      const hash = pieceCanvas ? canvasHash(pieceCanvas) : markup ? fnv(markup) : null;
+      if (hash) {
+        texts.push('piece=' + hash);
+        fast = true;
+      }
+    }
+    if (label === 'DRT' || label === 'QUAD') fast = true;
+    if (texts.length) parts.push(label + '=' + texts.join('/'));
+  });
+
+  const board = qs(side, 'app-nes-board');
+  if (board) {
+    const canvas = qs(board, 'canvas');
+    const markup = board.innerHTML || '';
+    const hash = canvas ? canvasHash(canvas) : markup ? fnv(markup) : null;
+    if (hash) {
+      parts.push('board=' + hash);
+      fast = true;
+    }
+  }
+
+  if (!parts.length) return null;
+  return { value: parts.join('|'), fast };
+}
+`;
+
+function buildPageHookSnippet() {
+  return `(() => {
+const W = window;
+if (!W.WebSocket) return;
+const sameWorld = W.__nestrisHomieCtx === '${CTX_TOKEN}';
+if (sameWorld) {
+  try { delete W.__nestrisHomieCtx; } catch (err) {}
+}
+const mode = sameWorld ? 'Seitenkontext' : 'Injektion';
+
+${PAGE_FN_DEFS}
+
+// WebSocket Hook
+if (!W.WebSocket.__nestrisHomieHooked) {
+  const Native = W.WebSocket;
+  const hooked = new Proxy(Native, {
+    construct(target, args) {
+      const socket = new target(...args);
+      try {
+        socket.addEventListener('message', (ev) => {
+          if (typeof ev.data !== 'string') return;
+          document.dispatchEvent(new CustomEvent('${WS_EVENT}', { detail: ev.data }));
+        });
+      } catch (err) {}
+      return socket;
+    },
+    get(target, prop, receiver) {
+      if (prop === '__nestrisHomieHooked') return true;
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  W.WebSocket = hooked;
+}
+
+// Polling für Scores, Signaturen, DOM-Status (läuft nur in der Seitenwelt)
+let pollTimer = null;
+let guessTimer = null;
+let lastScores = null;
+let oppSig = null, oppSigAt = null, oppFast = false;
+let meSig = null, meSigAt = null;
+
+function trackSignature(selector, who) {
+  const sig = sideSignature(document.querySelector(selector));
+  if (!sig) return;
+  if (who === 'opp') {
+    if (oppSig === null) oppSig = sig.value;
+    else if (oppSig !== sig.value) { oppSig = sig.value; oppSigAt = Date.now(); }
+    if (sig.fast) oppFast = true;
+  } else {
+    if (meSig === null) meSig = sig.value;
+    else if (meSig !== sig.value) { meSig = sig.value; meSigAt = Date.now(); }
+  }
+}
+
+function pollPageState() {
+  const scores = readScores();
+  const now = Date.now();
+  trackSignature('${PAGE_DOM_SEL.sideOpponent}', 'opp');
+  trackSignature('${PAGE_DOM_SEL.sideMe}', 'me');
+
+  // DOM-Status-Fallback (wie guessStatusFromDom)
+  let domStatus = null;
+  const countdown = readCountdownText();
+  if (countdown === 'READY' || countdown === 'NOT READY' || /^Aborting in/.test(countdown || '')) {
+    domStatus = 'BEFORE_GAME';
+  } else if (countdown === 'LEFT ROOM') {
+    domStatus = 'ABORTED';
+  } else {
+    domStatus = 'IN_GAME';
+  }
+
+  const changed = !lastScores ||
+    scores.myScore !== lastScores.myScore ||
+    scores.oppScore !== lastScores.oppScore ||
+    scores.diff !== lastScores.diff ||
+    scores.myName !== lastScores.myName ||
+    scores.oppName !== lastScores.oppName ||
+    scores.mySeries !== lastScores.mySeries ||
+    scores.oppSeries !== lastScores.oppSeries;
+  lastScores = scores;
+
+  document.dispatchEvent(new CustomEvent('${PAGE_STATE_EVENT}', {
+    detail: { scores, domStatus, oppSig, oppSigAt, oppFast, meSig, meSigAt, changed }
+  }));
+}
+
+function guessDomStatus() {
+  const countdown = readCountdownText();
+  let domStatus = null;
+  if (countdown === 'READY' || countdown === 'NOT READY' || /^Aborting in/.test(countdown || '')) {
+    domStatus = 'BEFORE_GAME';
+  } else if (countdown === 'LEFT ROOM') {
+    domStatus = 'ABORTED';
+  } else {
+    domStatus = 'IN_GAME';
+  }
+  document.dispatchEvent(new CustomEvent('${PAGE_STATE_EVENT}', { detail: { domStatus } }));
+}
+
+pollTimer = setInterval(pollPageState, 400);
+guessTimer = setInterval(guessDomStatus, 1000);
+
+// Cleanup bei Unload
+window.addEventListener('beforeunload', () => {
+  if (pollTimer) clearInterval(pollTimer);
+  if (guessTimer) clearInterval(guessTimer);
+});
+
+document.dispatchEvent(new CustomEvent('${HOOK_OK_EVENT}', { detail: mode }));
+})();`;
+}
+
+const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
+
+/**
+ * Hängt sich an den WebSocket der Seite, ohne die Kommunikation anzutasten.
+ * Muss vor dem Seitenaufruf installiert werden (@run-at document-start).
+ *
+ * Zwei Wege, die beide immer laufen (Issue #6 – Regression "Detecting
+ * game..." seit v0.5.0):
+ *  - Direkt: im Seitenkontext (@sandbox raw, wie bis v0.4.0 mit
+ *    @grant none) hängt der Proxy sofort an window.WebSocket. Läuft eine
+ *    Sandbox, bleibt dieser Eingriff auf unsere eigene Welt begrenzt und
+ *    berührt die Seite nicht.
+ *  - Injektion: ein Inline-Skript hakt den Konstruktor in der Seite um und
+ *    schickt die Nachrichten per CustomEvent zurück. Im Seitenkontext
+ *    erkennt es unseren Welt-Token und läuft nicht doppelt (Marker);
+ *    sandboxt der Manager, ist die Injektion der einzige sichere Weg.
+ *    nestris.org hat keine Content-Security-Policy (geprüft); scheitert
+ *    die Injektion, bleibt die Seite unberührt und die Statuszeile weist
+ *    den Mitschnitt als inaktiv aus.
+ */
   function installWebSocketHook() {
     // Welt-Token: das injizierte Skript liest ihn zurück und verrät so,
     // ob es in unserem Kontext läuft.
@@ -939,6 +1175,36 @@
       if (mode === 'Seitenkontext' || mode === 'Injektion') state.hook.mode = mode;
       state.hook.installed = true;
       updateStatusLine();
+    });
+
+    // Page State Event: empfängt Scores, Signaturen, DOM-Status aus der injizierten
+    // Seiten-Welt (Issue #6 – kein Canvas/DOM-Zugriff aus der Sandbox).
+    document.addEventListener(PAGE_STATE_EVENT, (ev) => {
+      const detail = ev && ev.detail;
+      if (!detail) return;
+
+      // Scores aus der Seitenwelt übernehmen
+      if (detail.scores) {
+        const prevScores = state.scores;
+        state.scores = detail.scores;
+        if (detail.changed && detail.scores) {
+          handleLeadChange(detail.scores);
+          watchTopout();
+        }
+        updateStatusLine();
+      }
+
+      // Chasedown-Signaturen aus der Seitenwelt übernehmen
+      if (detail.oppSig !== undefined) state.oppSig = detail.oppSig;
+      if (detail.oppSigAt !== undefined) state.oppSigAt = detail.oppSigAt;
+      if (detail.oppFast !== undefined) state.oppFast = detail.oppFast;
+      if (detail.meSig !== undefined) state.meSig = detail.meSig;
+      if (detail.meSigAt !== undefined) state.meSigAt = detail.meSigAt;
+
+      // DOM-Status-Fallback, falls WS noch keine Nachrichten geliefert hat
+      if (detail.domStatus && !state.wsSeen) {
+        applyRoomState({ status: detail.domStatus });
+      }
     });
 
     // Modus-Schätzung bis das Skript sich meldet: Firefox-Sonderkontexte
@@ -1983,8 +2249,13 @@
       buildUi();
       updateStatusLine();
 
-      setInterval(pollScores, 400);
-      setInterval(guessStatusFromDom, 1000);
+      // Polling-Intervalle nur im Seitenkontext starten.
+      // Im Injektions-Modus läuft das Polling im injizierten Skript (Seitenwelt),
+      // um Canvas-Zugriffe aus der Sandbox zu vermeiden (Issue #6).
+      if (state.hook.mode === 'Seitenkontext') {
+        setInterval(pollScores, 400);
+        setInterval(guessStatusFromDom, 1000);
+      }
 
       // Bleiben aktiv (statt once), bis die Sprachausgabe tatsächlich läuft:
       // erst dann kann eine nach Autoplay-Sperre gescheiterte Ansage erneut

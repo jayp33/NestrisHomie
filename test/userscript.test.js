@@ -16,9 +16,10 @@
  *   11. Lokales TTS-Backend (Issue #4): Server-Aktivierung per /health,
  *       WAV-Wiedergabe, Cache, Unterbrechung, Autoplay-Sperre,
  *       Circuit-Breaker und Umschaltung auf die Browser-Stimme
- *   12. Sandbox-Fall (Issue #6): unsafeWindow wird nicht beschrieben, statt
- *       dessen wird ein Hook-Skript in die Seite injiziert und die Nachrichten
- *       laufen über ein CustomEvent zurück bis in den Skriptkontext
+ *   12. Sandbox-Fall (Issue #6): die Seite wird nur über ein injiziertes
+ *       Hook-Skript erreicht (der Welt-Token meldet den Modus "Injektion"),
+ *       die Nachrichten laufen über ein CustomEvent zurück bis in den
+ *       Skriptkontext; das Seitenfenster bleibt bis dahin unberührt
  *
  * Aufruf: node test/userscript.test.js
  */
@@ -863,13 +864,15 @@ async function run() {
   check('Backend-Info konsistent', api.speechInfo().server.wanted === false);
 
   /* ---------------------------------------------------------------
-   * 12. Sandbox-Fall (Issue #6): Der Manager ignoriert @sandbox und
-   *     liefert unsafeWindow != window. Dann darf die Seite NICHT über
-   *     unsafeWindow verändert werden; stattdessen wird ein Hook-Skript
-   *     injiziert (hier von Hand ausgeführt, wie der Browser es täte)
-   *     und die Nachrichten kommen per CustomEvent zurück.
+   * 12. Sandbox-Fall (Issue #6): Der Manager sandboxt das Skript (hier
+   *     über cloneInto modelliert wie im Firefox-Sonderkontext). Die
+   *     Seite darf dann NICHT über window/unsafeWindow verändert werden;
+   *     stattdessen wird ein Hook-Skript injiziert (hier von Hand
+   *     ausgeführt, wie der Browser es täte), dessen Welt-Token den
+   *     Modus "Injektion" bestätigt – und die Nachrichten kommen per
+   *     CustomEvent zurück.
    * --------------------------------------------------------------- */
-  console.log('12. Sandbox-Fall: Seitenkontext-Injektion statt unsafeWindow');
+  console.log('12. Sandbox-Fall: Seitenkontext-Injektion statt Fensterzugriff');
   {
     const createdScripts = [];
     const realCreate = documentStub.createElement;
@@ -890,7 +893,9 @@ async function run() {
     };
     const sandbox2 = {
       window: sandboxWindow,
-      unsafeWindow: pageWindow,
+      // Firefox-Sonderkontext: cloneInto existiert nur in Sandboxes – daran
+      // erkennt unser Skript die Welt und meldet den Modus "Injektion".
+      cloneInto: (value) => value,
       document: documentStub,
       localStorage: localStorageStub,
       console,
@@ -915,12 +920,19 @@ async function run() {
     const api2 = sandboxWindow.NestrisHomie;
     check('Debug-API im Skriptkontext', Boolean(api2));
     check(
-      'unsafeWindow bleibt unbeschrieben',
-      pageWindow.WebSocket === FakeSocket && !pageWindow.WebSocket.__nestrisHomieHooked,
+      'Seitenfenster bleibt bis zur Injektion unberührt',
+      pageWindow.WebSocket === FakeSocket &&
+        !pageWindow.WebSocket.__nestrisHomieHooked &&
+        !('NestrisHomie' in pageWindow) &&
+        !('nestrisHomieCtx' in pageWindow),
     );
     check(
-      'Hook-Modus "Injektion"',
-      api2 && api2.state.hook.mode === 'Injektion',
+      'Direkter Hook bleibt in der eigenen Welt',
+      Boolean(sandboxWindow.WebSocket.__nestrisHomieHooked),
+    );
+    check(
+      'Hook-Modus "Injektion", Seite noch nicht bestätigt',
+      api2 && api2.state.hook.mode === 'Injektion' && api2.state.hook.installed === false,
       JSON.stringify(api2 && api2.state.hook),
     );
 
@@ -933,14 +945,23 @@ async function run() {
 
     if (injected) {
       // Ausführung wie im Browser: in der Seiten-Welt, mit geteiltem Dokument.
+      let hookOkDetail;
+      documentStub.addEventListener('nestris-homie-hook-ok', (ev) => {
+        hookOkDetail = ev.detail;
+      });
       const pageCtx = { window: pageWindow, document: documentStub, CustomEvent: FakeCustomEvent };
       vm.createContext(pageCtx);
       vm.runInContext(injected.textContent, pageCtx);
 
       check('Hook in der Seite gelandet', Boolean(pageWindow.WebSocket.__nestrisHomieHooked));
       check(
+        'HOOK_OK meldet Modus "Injektion" (Welt-Token)',
+        hookOkDetail === 'Injektion',
+        `ist ${JSON.stringify(hookOkDetail)}`,
+      );
+      check(
         'HOOK_OK-Event hat die Statusmeldung gesetzt',
-        api2.state.hook.installed === true,
+        api2.state.hook.installed === true && api2.state.hook.mode === 'Injektion',
         JSON.stringify(api2.state.hook),
       );
 

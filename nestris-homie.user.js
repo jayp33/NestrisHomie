@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.5.1
+// @version      0.5.2
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
 //               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
@@ -11,8 +11,7 @@
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
-// @grant        unsafeWindow
-// @sandbox      MAIN_WORLD
+// @sandbox      raw
 // @inject-into  page
 // @connect      127.0.0.1
 // @connect      localhost
@@ -40,16 +39,15 @@
 
   const LOG = '[NestrisHomie]';
 
-  /* Injection-Kontext (Issue #6): @sandbox MAIN_WORLD (Tampermonkey) bzw.
-     @inject-into page (Violentmonkey) sollen das Skript trotz der Grants für
-     den GM-Zugriff in den Seitenkontext legen – so lief es bis v0.4.0 mit
-     @grant none problemlos. Beachtet der Manager das nicht (Firefox leitet
-     aus @grant unsafeWindow einen eigenen Sandbox-Kontext ab), hängt sich der
-     WebSocket-Hook per Inline-Injektion an die Seite (Abschnitt 4) und lädt
-     die Nachrichten über ein CustomEvent zurück; unsafeWindow wird dabei
-     bewusst nie beschrieben. In grant-freien Umgebungen (Tests, Notfall-Update
-     ohne Tampermonkey) ist window ohnehin der Seitenkontext. */
-  const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+  /* Ausführungs-Kontext (Issue #6, v0.5.2): @grant unsafeWindow (v0.5.0)
+     erzwingt bei Tampermonkey den "JavaScript"-Zugriffsmodus – auf Firefox
+     entsteht dabei ein eigener Sonderkontext (USERSCRIPT_WORLD), in dem das
+     Skript die Seite nicht mehr wie bis v0.4.0 (@grant none) erreichte. Das
+     war der Auslöser der "Detecting game..."-Regression. Ohne diesen Grant
+     und mit @sandbox raw läuft das Skript wieder im Seitenkontext. Falls der
+     Manager uns dennoch sandboxt, injiziert Abschnitt 4 den Hook als
+     Inline-Skript in die Seite und holt die Nachrichten per CustomEvent
+     zurück; unsafeWindow wird dabei nie verwendet oder beschrieben. */
 
   /* ============================================================
    * 1. Einstellungen
@@ -415,7 +413,6 @@
     }
 
     function start() {
-      revalidate();
       onSettingsChanged((s, patch) => {
         if (!patch || (!('ttsBackend' in patch) && !('ttsUrl' in patch))) return;
         failures = 0;
@@ -424,6 +421,14 @@
         revalidate();
         updateStatusLine();
       });
+      // Erstmalige Serverprüfung nicht auf document-start (Issue #6): die
+      // Seite soll wie bis v0.4.0 ohne parallelen GM-Zugriff hochfahren.
+      const kick = () => revalidate();
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', kick, { once: true });
+      } else {
+        kick();
+      }
     }
 
     function getInfo() {
@@ -863,100 +868,126 @@
     dispatch(msg);
   }
 
-  /* Selbständige Hook-Fassung für den Seitenkontext: läuft außerhalb unseres
+  /* Selbständige Hook-Fassung für die Seite: läuft außerhalb unseres
      Skriptbereichs und darf deshalb keine Bindungen an unsere Variablen
-     benutzen – nur DOM, window und die beiden Event-Namen. Der Marker sitzt
-     im get-Trap, nicht per defineProperty: das würde am Proxy vorbei auf dem
-     nativen Seitenkonstruktor landen (Testabschnitt 12). */
+     benutzen – nur DOM, window, die Event-Namen und den Welt-Token. Der
+     Token stammt aus unserer Welt: sieht die Seite ihn, laufen wir selbst im
+     Seitenkontext ("Seitenkontext"), sonst ist die Injektion der einzige Weg
+     ("Injektion") – der Modus wird mit dem Hook_OK-Event gemeldet. Der
+     Marker sitzt im get-Trap, nicht per defineProperty: das würde am Proxy
+     vorbei auf dem nativen Seitenkonstruktor landen (Testabschnitt 12). */
+  const CTX_TOKEN = 'nh-' + Math.random().toString(36).slice(2);
+
   const PAGE_HOOK_SNIPPET = `(() => {
   const W = window;
   if (!W.WebSocket) return;
-  if (W.WebSocket.__nestrisHomieHooked) {
-    document.dispatchEvent(new CustomEvent('${HOOK_OK_EVENT}'));
-    return;
+  const sameWorld = W.__nestrisHomieCtx === '${CTX_TOKEN}';
+  if (sameWorld) {
+    try { delete W.__nestrisHomieCtx; } catch (err) {}
   }
-  const Native = W.WebSocket;
-  const hooked = new Proxy(Native, {
-    construct(target, args) {
-      const socket = new target(...args);
-      try {
-        socket.addEventListener('message', (ev) => {
-          if (typeof ev.data !== 'string') return;
-          document.dispatchEvent(new CustomEvent('${WS_EVENT}', { detail: ev.data }));
-        });
-      } catch (err) {}
-      return socket;
-    },
-    get(target, prop, receiver) {
-      if (prop === '__nestrisHomieHooked') return true;
-      const value = Reflect.get(target, prop, receiver);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
-  W.WebSocket = hooked;
-  document.dispatchEvent(new CustomEvent('${HOOK_OK_EVENT}'));
+  const mode = sameWorld ? 'Seitenkontext' : 'Injektion';
+  if (!W.WebSocket.__nestrisHomieHooked) {
+    const Native = W.WebSocket;
+    const hooked = new Proxy(Native, {
+      construct(target, args) {
+        const socket = new target(...args);
+        try {
+          socket.addEventListener('message', (ev) => {
+            if (typeof ev.data !== 'string') return;
+            document.dispatchEvent(new CustomEvent('${WS_EVENT}', { detail: ev.data }));
+          });
+        } catch (err) {}
+        return socket;
+      },
+      get(target, prop, receiver) {
+        if (prop === '__nestrisHomieHooked') return true;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    W.WebSocket = hooked;
+  }
+  document.dispatchEvent(new CustomEvent('${HOOK_OK_EVENT}', { detail: mode }));
 })();`;
 
   /**
    * Hängt sich an den WebSocket der Seite, ohne die Kommunikation anzutasten.
    * Muss vor dem Seitenaufruf installiert werden (@run-at document-start).
    *
-   * Zwei Wege (Issue #6 – Regression "Detecting game..." seit v0.5.0):
-   *  - Seitenkontext (@sandbox MAIN_WORLD, @grant none): wir sind die Seite,
-   *    der Proxy hängt direkt an window.WebSocket – der bewährte Weg bis 0.4.0.
-   *  - Sandbox (Fallback, wenn der Manager @sandbox nicht beachtet): die Seite
-   *    wird NICHT über unsafeWindow verändert (das war der Verdächtige),
-   *    sondern ein Inline-Skript injiziert, das den Konstruktor in der Seite
-   *    umhängt und die Nachrichten per CustomEvent zurückschickt. nestris.org
-   *    hat keine Content-Security-Policy (geprüft); schlägt die Injektion
-   *    fehl, bleibt die Seite unberührt und die Statuszeile weist den
-   *    Mitschnitt als inaktiv aus.
+   * Zwei Wege, die beide immer laufen (Issue #6 – Regression "Detecting
+   * game..." seit v0.5.0):
+   *  - Direkt: im Seitenkontext (@sandbox raw, wie bis v0.4.0 mit
+   *    @grant none) hängt der Proxy sofort an window.WebSocket. Läuft eine
+   *    Sandbox, bleibt dieser Eingriff auf unsere eigene Welt begrenzt und
+   *    berührt die Seite nicht.
+   *  - Injektion: ein Inline-Skript hakt den Konstruktor in der Seite um und
+   *    schickt die Nachrichten per CustomEvent zurück. Im Seitenkontext
+   *    erkennt es unseren Welt-Token und läuft nicht doppelt (Marker);
+   *    sandboxt der Manager, ist die Injektion der einzige sichere Weg.
+   *    nestris.org hat keine Content-Security-Policy (geprüft); scheitert
+   *    die Injektion, bleibt die Seite unberührt und die Statuszeile weist
+   *    den Mitschnitt als inaktiv aus.
    */
   function installWebSocketHook() {
-    const sandboxed = typeof unsafeWindow !== 'undefined' && unsafeWindow !== window;
+    // Welt-Token: das injizierte Skript liest ihn zurück und verrät so,
+    // ob es in unserem Kontext läuft.
+    window.__nestrisHomieCtx = CTX_TOKEN;
 
-    if (sandboxed) {
-      installInjectedHook();
-      return;
-    }
-
-    state.hook.mode = 'Seitenkontext';
-    const Native = window.WebSocket;
-    if (Native && !Native.__nestrisHomieHooked) {
-      const hooked = new Proxy(Native, {
-        construct(target, args) {
-          const socket = new target(...args);
-          try {
-            attachSocket(socket);
-          } catch (err) {
-            console.warn(LOG, 'WebSocket konnte nicht beobachtet werden', err);
-          }
-          return socket;
-        },
-        get(target, prop, receiver) {
-          // Marker im get-Trap: per defineProperty landete er am Proxy vorbei
-          // auf dem nativen Seitenkonstruktor (Page-Objekt) – hier bleibt der
-          // unberührt, gleichwohl meldet sich window.WebSocket als gehookt.
-          if (prop === '__nestrisHomieHooked') return true;
-          const value = Reflect.get(target, prop, receiver);
-          return typeof value === 'function' ? value.bind(target) : value;
-        },
-      });
-      window.WebSocket = hooked;
-    }
-    state.hook.installed = Boolean(window.WebSocket && window.WebSocket.__nestrisHomieHooked);
-    console.log(LOG, 'WebSocket-Mitschnitt aktiv (Seitenkontext)');
-  }
-
-  /** Sandbox-Fall: Hook in die Seite injizieren, Nachrichten per CustomEvent. */
-  function installInjectedHook() {
-    state.hook.mode = 'Injektion';
     document.addEventListener(WS_EVENT, (ev) => handleWsJson(ev && ev.detail));
-    document.addEventListener(HOOK_OK_EVENT, () => {
+    document.addEventListener(HOOK_OK_EVENT, (ev) => {
+      const mode = ev && ev.detail;
+      if (mode === 'Seitenkontext' || mode === 'Injektion') state.hook.mode = mode;
       state.hook.installed = true;
       updateStatusLine();
     });
 
+    // Modus-Schätzung bis das Skript sich meldet: Firefox-Sonderkontexte
+    // führen cloneInto aus, Chromes Isolated World sieht chrome.runtime.
+    const sandboxed = isSandboxWorld();
+    state.hook.mode = sandboxed ? 'Injektion' : 'Seitenkontext';
+
+    try {
+      const Native = window.WebSocket;
+      if (Native && !Native.__nestrisHomieHooked) {
+        const hooked = new Proxy(Native, {
+          construct(target, args) {
+            const socket = new target(...args);
+            try {
+              attachSocket(socket);
+            } catch (err) {
+              console.warn(LOG, 'WebSocket konnte nicht beobachtet werden', err);
+            }
+            return socket;
+          },
+          get(target, prop, receiver) {
+            // Marker im get-Trap: per defineProperty landete er am Proxy vorbei
+            // auf dem nativen Seitenkonstruktor (Page-Objekt) – hier bleibt der
+            // unberührt, gleichwohl meldet sich window.WebSocket als gehookt.
+            if (prop === '__nestrisHomieHooked') return true;
+            const value = Reflect.get(target, prop, receiver);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+        window.WebSocket = hooked;
+      }
+      // In einer Sandbox ist nur unsere eigene Welt gehookt – ob die Seite
+      // hängt, sagt allein das Hook_OK-Event der Injektion.
+      state.hook.installed =
+        !sandboxed && Boolean(window.WebSocket && window.WebSocket.__nestrisHomieHooked);
+    } catch (err) {
+      console.warn(LOG, 'Direkter WebSocket-Hook nicht möglich', err);
+    }
+
+    installInjectedHook();
+    console.log(LOG, 'WebSocket-Mitschnitt installiert', {
+      modus: state.hook.mode,
+      direkt: state.hook.installed,
+      sandbox: sandboxed,
+    });
+  }
+
+  /** Sandbox-Fall: Hook in die Seite injizieren, Nachrichten per CustomEvent. */
+  function installInjectedHook() {
     const inject = () => {
       const parent = document.documentElement;
       if (!parent) {
@@ -973,7 +1004,13 @@
       }
     };
     inject();
-    console.log(LOG, 'WebSocket-Mitschnitt: Seitenkontext-Injektion (Sandbox)');
+  }
+
+  /** Erkennt Sandbox-Welten (für Status/Logs; die Brücke läuft in beiden). */
+  function isSandboxWorld() {
+    if (typeof cloneInto === 'function') return true;
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) return true;
+    return false;
   }
 
   function attachSocket(socket) {
@@ -1799,9 +1836,36 @@
     return `Mitschnitt: aktiv (${h.mode})${fresh}`;
   }
 
+  /**
+   * Diagnose-Spiegel für die Seitenkonsole (Issue #6): Läuft das Skript in
+   * einer Sandbox, ist window.NestrisHomie dort nicht sichtbar – der
+   * Datensatz am <html>-Element zeigt denselben Stand in beiden Welten:
+   *   JSON.parse(document.documentElement.dataset.nestrisHomie)
+   */
+  function mirrorDiagnostics() {
+    try {
+      const el = document.documentElement;
+      if (!el) return;
+      el.dataset.nestrisHomie = JSON.stringify({
+        modus: state.hook.mode,
+        mitschnitt: state.hook.installed,
+        letzteWs: state.hook.lastMsgAt,
+        wsGesehen: state.wsSeen,
+        status: state.status,
+        raum: state.roomStatus,
+        aktiv: settings.enabled,
+      });
+    } catch (err) {
+      // Nur Diagnose – Fehler hier dürfen die Statuszeile nicht stören.
+    }
+  }
+
   function updateStatusLine() {
     if (!ui.updateStatus) return;
-    const render = (text) => ui.updateStatus(`${text}\n${hookStatusText()}`);
+    const render = (text) => {
+      ui.updateStatus(`${text}\n${hookStatusText()}`);
+      mirrorDiagnostics();
+    };
     if (!settings.enabled) {
       render(`Status: deaktiviert\n${speechStatusText()}`);
       return;
@@ -1897,7 +1961,7 @@
     console.log(LOG, 'Startkontext:', {
       hook: state.hook.mode,
       mitschnitt: state.hook.installed,
-      sandbox: typeof unsafeWindow !== 'undefined' && unsafeWindow !== window,
+      sandbox: isSandboxWorld(),
       gmXhr:
         typeof GM_xmlhttpRequest === 'function' ||
         (typeof GM !== 'undefined' && Boolean(GM) && typeof GM.xmlHttpRequest === 'function'),
@@ -2000,10 +2064,10 @@
     }),
   };
 
-  // Mit @grant ist window die Sandbox – für die Seitenkonsole hängt das
-  // Debug-Objekt zusätzlich am echten Seitenfenster.
+  // Debug-Hilfe in der Seitenkonsole (Seitenkontext) bzw. der TM-Konsole
+  // (Sandbox – dort zeigt der Datensatz am <html>-Element denselben Stand):
+  //   JSON.parse(document.documentElement.dataset.nestrisHomie)
   window.NestrisHomie = debugApi;
-  if (pageWin !== window) pageWin.NestrisHomie = debugApi;
 
   start();
 })();

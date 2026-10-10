@@ -112,14 +112,17 @@ CSS-Klasse `.side.me`, ob du selbst spielst.
    installiert werden (`@run-at document-start`).
 
 Damit die Seite trotz der Grants (für den optionalen TTS-Server) in Ruhe
-gelassen wird, erzwingt der Skript-Kopf den Seitenkontext:
-`@sandbox MAIN_WORLD` (Tampermonkey) bzw. `@inject-into page`
-(Violentmonkey). Beachtet der Manager das nicht, hängt sich der Hook per
-Inline-Skript direkt in der Seite ein und holt die Nachrichten über ein
-CustomEvent zurück (Issue #6). Die Statuszeile im Dialog zeigt den
-gewählten Weg: `Mitschnitt: aktiv (Seitenkontext)` bzw. `(Injektion)` –
-`inaktiv` heißt, die Injektion wurde blockiert, die Seite läuft aber
-unberührt weiter.
+gelassen wird, erzwingt der Skript-Kopf den Seitenkontext: `@sandbox raw`
+(Tampermonkey) bzw. `@inject-into page` (Violentmonkey). Ein
+`@grant unsafeWindow` gibt es bewusst nicht mehr – es erzwingt bei
+Tampermonkey auf Firefox einen eigenen Sonderkontext und war der Auslöser der
+Regression aus Issue #6. Beachtet der Manager `@sandbox` nicht, hängt sich
+der Hook per Inline-Skript direkt in die Seite ein und holt die Nachrichten
+über ein CustomEvent zurück. Die Statuszeile im Dialog zeigt den gewählten
+Weg: `Mitschnitt: aktiv (Seitenkontext)` bzw. `(Injektion)` – `inaktiv`
+heißt, die Injektion wurde blockiert, die Seite läuft aber unberührt
+weiter. Denselben Stand ohne Konsole am Skript zeigt
+`JSON.parse(document.documentElement.dataset.nestrisHomie)`.
 
 Danach erscheint unten rechts eine 🎙-Schaltfläche mit dem Einstellungsdialog.
 
@@ -369,7 +372,8 @@ ausgeliefert.
   WebSocket-Nachrichten und verändert den Spielverlauf nicht.
 * Der Statusfallback ohne WebSocket (`guessStatusFromDom`) greift nur, wenn der
   Mitschnitt nicht aktiv ist – in dem Fall Seite neu laden.
-* Die Server-Option braucht Tampermonkey (Grants `GM_xmlhttpRequest` und
-  `unsafeWindow`). Läuft das Skript ohne Grants in einem anderen
+* Die Server-Option braucht Tampermonkey mit den Grants `GM_xmlhttpRequest`
+  (bzw. `GM.xmlHttpRequest`). Läuft das Skript ohne Grants in einem anderen
   Userscript-Manager, spricht automatisch die Browser-Stimme; der
-  WebSocket-Mitschnitt greift dann auf `window` statt `unsafeWindow` zurück.
+  WebSocket-Mitschnitt hängt dann direkt an `window` bzw. installiert sich
+  per Seiten-Injektion (Issue #6).

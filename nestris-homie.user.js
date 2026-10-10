@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.8.2
+// @version      0.8.3
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
 //               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
@@ -1412,7 +1412,8 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
   }
 
   /** Liest den Seed vom eigenen Board (Issue #10).
-   *  Der Seed wird vor Matchbeginn auf dem eigenen Board angezeigt. */
+   *  Der Seed wird vor Matchbeginn auf dem eigenen Board angezeigt.
+   *  Der Seed ist immer 6-stellig hexadezimal (0-9, a-f). */
   function readOwnSeed() {
     const me = document.querySelector(DOM_SEL.sideMe);
     if (!me) return null;
@@ -1421,14 +1422,15 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     const board = qs(me, 'app-nes-board');
     if (board) {
       // Suche nach Elementen die "Seed" enthalten
+      // Seed ist 6-stellig hexadezimal (0-9, a-f)
       const allText = board.textContent || '';
-      const seedMatch = allText.match(/Seed[:\s]*(\d+)/i);
+      const seedMatch = allText.match(/Seed[:\s]*([0-9a-f]{6})/i);
       if (seedMatch) return seedMatch[1];
     }
     // Fallback: Suche im gesamten eigenen Bereich
     const ownArea = qs(me, '.my-game') || me;
     const allText2 = ownArea.textContent || '';
-    const seedMatch2 = allText2.match(/Seed[:\s]*(\d+)/i);
+    const seedMatch2 = allText2.match(/Seed[:\s]*([0-9a-f]{6})/i);
     if (seedMatch2) return seedMatch2[1];
     return null;
   }
@@ -2223,13 +2225,13 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       min-width: 320px;
     `;
     overlay.innerHTML = `
-      <h2 style="margin: 0; font-size: 20px; color: #58d774; letter-spacing: 0.5px;">Match-Info</h2>
-      <div style="display: flex; flex-direction: column; gap: 12px;">
-        <div style="display: flex; justify-content: space-between; gap: 24px; font-size: 16px;">
-          <div><strong>Seed:</strong> <span id="nh-seed-value" style="font-family: monospace; color: #ffd700;">–</span></div>
-          <div><strong>Level:</strong> <span id="nh-level-value" style="font-family: monospace; color: #58d774;">–</span></div>
+      <h2 style="margin: 0; font-size: 24px; color: #58d774; letter-spacing: 0.5px;">Match-Info</h2>
+      <div style="display: flex; flex-direction: column; gap: 16px;">
+        <div style="display: flex; justify-content: space-between; gap: 32px; font-size: 28px;">
+          <div><strong>Seed:</strong> <span id="nh-seed-value" style="font-family: monospace; color: #ffd700; letter-spacing: 2px;">–</span></div>
+          <div><strong>Level:</strong> <span id="nh-level-value" style="font-family: monospace; color: #58d774; letter-spacing: 2px;">–</span></div>
         </div>
-        <p style="margin: 8px 0 0; font-size: 12px; color: #888;">
+        <p style="margin: 12px 0 0; font-size: 13px; color: #888;">
           Verschwindet automatisch, sobald du "Ready" klickst.
         </p>
       </div>

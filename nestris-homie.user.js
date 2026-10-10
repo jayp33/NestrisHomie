@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.8.1
+// @version      0.8.2
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
 //               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
@@ -958,6 +958,21 @@ function readSideLines(side) {
   }
   return null;
 }
+function readOwnSeed() {
+  const me = document.querySelector('${PAGE_DOM_SEL.sideMe}');
+  if (!me) return null;
+  const board = qs(me, 'app-nes-board');
+  if (board) {
+    const allText = board.textContent || '';
+    const seedMatch = allText.match(/Seed[:\s]*(\d+)/i);
+    if (seedMatch) return seedMatch[1];
+  }
+  const ownArea = qs(me, '.my-game') || me;
+  const allText2 = ownArea.textContent || '';
+  const seedMatch2 = allText2.match(/Seed[:\s]*(\d+)/i);
+  if (seedMatch2) return seedMatch2[1];
+  return null;
+}
 function readCountdownText() {
   const el = document.querySelector('${PAGE_DOM_SEL.sideMe} ${PAGE_DOM_SEL.countdown}');
   return el ? el.textContent.trim() : null;
@@ -1393,6 +1408,28 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
         if (v !== null) return v;
       }
     }
+    return null;
+  }
+
+  /** Liest den Seed vom eigenen Board (Issue #10).
+   *  Der Seed wird vor Matchbeginn auf dem eigenen Board angezeigt. */
+  function readOwnSeed() {
+    const me = document.querySelector(DOM_SEL.sideMe);
+    if (!me) return null;
+    // Seed wird oft im Board-Bereich oder in der Nähe des Level/Countdown angezeigt
+    // Versuche verschiedene Selektoren
+    const board = qs(me, 'app-nes-board');
+    if (board) {
+      // Suche nach Elementen die "Seed" enthalten
+      const allText = board.textContent || '';
+      const seedMatch = allText.match(/Seed[:\s]*(\d+)/i);
+      if (seedMatch) return seedMatch[1];
+    }
+    // Fallback: Suche im gesamten eigenen Bereich
+    const ownArea = qs(me, '.my-game') || me;
+    const allText2 = ownArea.textContent || '';
+    const seedMatch2 = allText2.match(/Seed[:\s]*(\d+)/i);
+    if (seedMatch2) return seedMatch2[1];
     return null;
   }
 
@@ -2211,10 +2248,13 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
 
     // Seed und Level aus roomState lesen
     // Seed ist optional (nicht in allen roomState-Varianten enthalten)
-    if (seedEl && roomState && roomState.seed !== undefined) {
-      seedEl.textContent = roomState.seed;
-    } else if (seedEl) {
-      seedEl.textContent = '–';
+    // Fallback: Seed aus DOM lesen (eigenes Board)
+    let seed = roomState && roomState.seed;
+    if (seed === undefined) {
+      seed = readOwnSeed();
+    }
+    if (seedEl) {
+      seedEl.textContent = seed !== undefined && seed !== null ? seed : '–';
     }
     if (levelEl && roomState && roomState.startLevel !== undefined) {
       levelEl.textContent = roomState.startLevel;

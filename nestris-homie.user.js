@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.7.0
+// @version      0.8.0
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
 //               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
@@ -72,13 +72,15 @@
     eventGapSec: 6,           // Mindestabstand zwischen Event-Ansagen
     // Runway (Lines-Differenz) ansagen, wenn >= 10 Reihen (Issue #5)
     announceLines: true,
+    // Seed/Level Overlay vor Matchbeginn (Issue #10)
+    showSeedLevelOverlay: true,
     // Sprach-Backend (Issue #4): 'auto' = lokaler neuronaler Server, sonst
     // Browser-Stimme; 'server' erzwingt den Server, 'browser' schließt ihn aus.
     ttsBackend: 'auto',
     ttsUrl: 'http://127.0.0.1:8099', // lokaler audio.cpp-Dienst
     ttsVoice: 'M1',                  // Supertonic-Stimme des Servers
     ttsTimeoutSec: 4,                // Timeout für Server-Anfragen
-    serverRate: 1.2,                 // Abspielgeschwindigkeit der WAV-Ansagen
+    serverRate: 1.2,                 // Abspieltempo der WAV-Ansagen
     // Chat-Nachrichten (Issue #7): 'glhf' bei Matchbeginn, 'gg' bei Matchende
     announceChat: true,
   };
@@ -1372,6 +1374,10 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     username: 'app-username p',
     series: 'p.score',
     countdown: 'h1.countdown',
+    // Seed/Level Overlay (Issue #10)
+    seedOverlay: '#nh-seed-overlay',
+    seedValue: '#nh-seed-value',
+    levelValue: '#nh-level-value',
   };
 
   /** Liest Lines (Reihen) aus dem Side-Panel. */
@@ -1657,6 +1663,20 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     const prevStatus = state.status;
     state.roomState = next;
     state.status = next.status || null;
+
+    // Seed/Level Overlay: anzeigen wenn BEFORE_GAME und seed/level vorhanden (Issue #10)
+    if (state.status === STATUS.BEFORE_GAME && next.seed !== undefined && next.startLevel !== undefined) {
+      showSeedLevelOverlay(next);
+    }
+
+    // Seed/Level Overlay: ausblenden wenn eigener Ready-Status true wird (Issue #10)
+    if (state.status === STATUS.BEFORE_GAME && Array.isArray(next.ready)) {
+      const myIdx = myIndexIn(next);
+      if (myIdx !== null && next.ready[myIdx] === true) {
+        hideSeedLevelOverlay();
+      }
+    }
+
     if (prevStatus === state.status) return;
     onStatusChange(prevStatus, state.status, next);
   }
@@ -1669,6 +1689,8 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       resetTopoutWatch();
       state.scores = readScores();
       schedulePeriodic(settings.intervalSec * 1000);
+      // Seed/Level Overlay ausblenden beim Spielstart (Issue #10)
+      hideSeedLevelOverlay();
       if (settings.announceStartEnd && prev !== STATUS.IN_GAME) {
         emitEvent(t('started', state.scores && state.scores.oppName));
       }
@@ -2012,6 +2034,7 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       <label class="row"><span>Chasedown / Sieg ansagen</span><input type="checkbox" data-key="announceTopout"></label>
       <label class="row"><span>Chat: glhf / gg</span><input type="checkbox" data-key="announceChat"></label>
       <label class="row"><span>Runway (Reihen) ansagen</span><input type="checkbox" data-key="announceLines"></label>
+      <label class="row"><span>Seed/Level Overlay</span><input type="checkbox" data-key="showSeedLevelOverlay"></label>
       <label class="row"><span>Topout erkennen nach</span>
         <input type="number" min="3" max="60" step="1" data-key="topoutSec"> Sek. Stillstand</label>
       <label class="row"><span>Spielstand ansagen</span><input type="checkbox" data-key="announceSeries"></label>
@@ -2126,10 +2149,84 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
 
     syncInputs();
 
+    // Seed/Level Overlay erstellen (Issue #10)
+    createSeedLevelOverlay();
+
     // Sprache gezielt geändert -> Stimmliste neu einlesen.
     panel.querySelector('select[data-key="language"]').addEventListener('change', () => {
       setTimeout(() => ui.refreshVoices(TTS.getVoices()), 50);
     });
+  panel.querySelector('select[data-key="language"]').addEventListener('change', () => {
+      setTimeout(() => ui.refreshVoices(TTS.getVoices()), 50);
+    });
+  }
+
+  /** Erstellt das Seed/Level Overlay (Issue #10). */
+  function createSeedLevelOverlay() {
+    if (document.getElementById('nh-seed-overlay')) return;
+
+    const overlay = document.createElement('div');
+    overlay.id = 'nh-seed-overlay';
+    overlay.style.cssText = `
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 2147483646;
+      background: rgba(29, 28, 31, 0.95);
+      border: 2px solid #58d774;
+      border-radius: 16px;
+      padding: 32px 48px;
+      text-align: center;
+      font-family: Montserrat, Roboto, system-ui, sans-serif;
+      color: #fff;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.8);
+      backdrop-filter: blur(12px);
+      display: none;
+      flex-direction: column;
+      gap: 16px;
+      min-width: 320px;
+    `;
+    overlay.innerHTML = `
+      <h2 style="margin: 0; font-size: 20px; color: #58d774; letter-spacing: 0.5px;">Match-Info</h2>
+      <div style="display: flex; flex-direction: column; gap: 12px;">
+        <div style="display: flex; justify-content: space-between; gap: 24px; font-size: 16px;">
+          <div><strong>Seed:</strong> <span id="nh-seed-value" style="font-family: monospace; color: #ffd700;">–</span></div>
+          <div><strong>Level:</strong> <span id="nh-level-value" style="font-family: monospace; color: #58d774;">–</span></div>
+        </div>
+        <p style="margin: 8px 0 0; font-size: 12px; color: #888;">
+          Verschwindet automatisch, sobald du "Ready" klickst.
+        </p>
+      </div>
+    `;
+    document.documentElement.appendChild(overlay);
+  }
+
+  /** Zeigt das Seed/Level Overlay mit den aktuellen Werten. */
+  function showSeedLevelOverlay(roomState) {
+    if (!settings.showSeedLevelOverlay) return;
+    const overlay = document.getElementById('nh-seed-overlay');
+    if (!overlay) return;
+
+    const seedEl = document.getElementById('nh-seed-value');
+    const levelEl = document.getElementById('nh-level-value');
+
+    // Seed und Level aus roomState lesen
+    // roomState kann seed, startLevel enthalten
+    if (seedEl && roomState && roomState.seed !== undefined) {
+      seedEl.textContent = roomState.seed;
+    }
+    if (levelEl && roomState && roomState.startLevel !== undefined) {
+      levelEl.textContent = roomState.startLevel;
+    }
+
+    overlay.style.display = 'flex';
+  }
+
+  /** Versteckt das Seed/Level Overlay. */
+  function hideSeedLevelOverlay() {
+    const overlay = document.getElementById('nh-seed-overlay');
+    if (overlay) overlay.style.display = 'none';
   }
 
   function syncInputs() {

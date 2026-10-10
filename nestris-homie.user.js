@@ -1022,17 +1022,22 @@ function sideSignature(side) {
   if (board) {
     const canvas = qs(board, 'canvas');
     const markup = board.innerHTML || '';
-    // Billiger Markup-Hash als Fallback (ohne getImageData)
+    // Board-Canvas-Hash gedrosselt (alle ~1,5 s) um Hauptthread zu schonen.
+    // Cached real hash wird konsistent verwendet, damit die Signatur bei Stillstand
+    // nicht zwischen Markup- und echtem Hash flackert.
     let hash = markup ? fnv(markup) : null;
-    // Echter Canvas-Hash nur alle ~1,5 s und nur wenn oppFast schon true ist
-    // (dann läuft Chasedown-Erkennung und wir brauchen Bestätigung)
     const now = Date.now();
     if (canvas && typeof side._lastBoardHash === 'undefined') side._lastBoardHash = 0;
     if (canvas && now - (side._lastBoardHash || 0) > 1500) {
       const realHash = canvasHash(canvas);
-      if (realHash) hash = realHash;
+      if (realHash) {
+        side._lastRealBoardHash = realHash;
+        hash = realHash;
+      }
       side._lastBoardHash = now;
     }
+    // Konsistent den letzten echten Hash (oder Markup-Fallback) nutzen
+    if (side._lastRealBoardHash) hash = side._lastRealBoardHash;
     if (hash) {
       parts.push('board=' + hash);
       fast = true;
@@ -1469,15 +1474,21 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       const canvas = qs(board, 'canvas');
       const markup = board.innerHTML || '';
       // Board-Canvas-Hash gedrosselt (alle ~1,5 s) um Hauptthread zu schonen.
-      // Billiger Markup-Hash als Fallback, echter Canvas-Hash nur im Intervall.
+      // Cached real hash wird konsistent verwendet, damit die Signatur bei Stillstand
+      // nicht zwischen Markup- und echtem Hash flackert.
       let hash = markup ? fnv(markup) : null;
       const now = Date.now();
       if (canvas && typeof side._lastBoardHash === 'undefined') side._lastBoardHash = 0;
       if (canvas && now - (side._lastBoardHash || 0) > 1500) {
         const realHash = canvasHash(canvas);
-        if (realHash) hash = realHash;
+        if (realHash) {
+          side._lastRealBoardHash = realHash;
+          hash = realHash;
+        }
         side._lastBoardHash = now;
       }
+      // Konsistent den letzten echten Hash (oder Markup-Fallback) nutzen
+      if (side._lastRealBoardHash) hash = side._lastRealBoardHash;
       if (hash) {
         parts.push('board=' + hash);
         fast = true; // Minos/aktives Piece ändern sich im Spiel ständig

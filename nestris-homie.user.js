@@ -366,9 +366,9 @@
   }
 
   /* Ansagen der Differenz werden auf ganze Tausender gerundet: Vorsprung
-     abwärts, Rückstand aufwärts. 1 Punkt Rückstand heißt also schon
-     "eintausend Punkte Rückstand", 500 Punkte Vorsprung werden zur
-     "knappen" Führung ohne Zahl (siehe aheadKnapp). */
+     abwärts, Rückstand aufwärts. Der Rand liegt genau bei 1000:
+     1000 Punkte Vorsprung heißen "eintausend", 999 noch "knapp vorn";
+     1000 Punkte Rückstand heißen "eintausend", 1001 schon "zweitausend". */
   const roundLeadDown = (d) => Math.floor(d / 1000) * 1000;
   const roundDeficitUp = (d) => Math.ceil(d / 1000) * 1000;
   /** Kleiner als eine Tausend: Führung knapp, ohne Punktangabe ansagen. */

@@ -26,10 +26,25 @@ aufwärts.
 | Situation | Angesagt |
 | --- | --- |
 | 25 432 Punkte Vorsprung | „fünfundzwanzigtausend Punkte Vorsprung" (abgerundet) |
-| 500 Punkte Vorsprung | „Du liegst knapp vorn." (keine Zahl) |
+| 999 Punkte Vorsprung | „Du liegst knapp vorn." (keine Zahl) |
 | 1 000 Punkte Vorsprung | „eintausend Punkte Vorsprung" (erst ab 1000 mit Zahl) |
 | 1 Punkt Rückstand | „eintausend Punkten Rückstand" (aufgerundet) |
-| 1 501 Punkte Rückstand | „zweitausend Punkten Rückstand" (aufgerundet) |
+| 1 000 Punkte Rückstand | „eintausend Punkten Rückstand" |
+| 1 001 Punkte Rückstand | „zweitausend Punkten Rückstand" (aufgerundet) |
+
+Beide Seiten runden auf den nächsten Tausender, nur in entgegengesetzter
+Richtung – Vorsprung abwärts, Rückstand aufwärts. Dadurch liegt die Stufe
+beim Rückstand eine Einheit früher:
+
+| Differenz | Vorsprung | Rückstand |
+| --- | --- | --- |
+| 1 … 999 | „knapp" | 1 000 |
+| 1 000 | 1 000 | 1 000 |
+| 1 001 … 1 999 | 1 000 | 2 000 |
+| 2 000 | 2 000 | 2 000 |
+
+Vorsprung wird nie überzeichnet (1 999 heißt noch „eintausend"), Rückstand
+nie beschönigt (1 001 heißt schon „zweitausend").
 
 Ein Führungswechsel unter 1000 Punkten klingt entsprechend abgeschwächt:
 „Du übernimmst knapp die Führung!" bzw. „Du hast die Führung knapp

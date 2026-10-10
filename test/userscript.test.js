@@ -409,10 +409,36 @@ async function run() {
     api.previewAnnouncement(),
   );
 
-  setScores(95000, 96501);
+  setScores(96999, 95000);
   await sleep(500);
   check(
-    'Rückstand von 1501 wird auf 2000 aufgerundet',
+    'Vorsprung von 1999 wird auf 1000 abgerundet',
+    api.previewAnnouncement().includes('eintausend Punkten Vorsprung')
+      && !api.previewAnnouncement().includes('zweitausend'),
+    api.previewAnnouncement(),
+  );
+
+  setScores(97000, 95000);
+  await sleep(500);
+  check(
+    'Vorsprung von 2000 wird zu 2000 angesagt',
+    api.previewAnnouncement().includes('zweitausend Punkten Vorsprung'),
+    api.previewAnnouncement(),
+  );
+
+  // Grenze: 1000 Rückstand -> 1000, aber 1001 -> 2000.
+  setScores(95000, 96000);
+  await sleep(500);
+  check(
+    'Rückstand von 1000 wird zu 1000 angesagt',
+    api.previewAnnouncement().includes('eintausend Punkten Rückstand'),
+    api.previewAnnouncement(),
+  );
+
+  setScores(95000, 96001);
+  await sleep(500);
+  check(
+    'Rückstand von 1001 wird zu 2000 aufgerundet',
     api.previewAnnouncement().includes('zweitausend Punkten Rückstand'),
     api.previewAnnouncement(),
   );

@@ -135,18 +135,33 @@ NestrisHomie.readScores()           // Rohwerte aus dem DOM
 NestrisHomie.previewAnnouncement()  // Text der nächsten Intervallansage
 NestrisHomie.say('Test')            // sofort sprechen
 NestrisHomie.setSettings({ intervalSec: 20 })
+NestrisHomie.speechInfo()           // Sprach-Diagnose (siehe unten)
+NestrisHomie.retryFailedSpeech()    // nach Klick gescheiterte Ansage wiederholen
 ```
 
-## Hinweise zur Sprachausgabe
+### Wenn keine Sprache zu hören ist
 
-* **Browser-Sprache / Sprachpaket**: Für deutsche Ansagen braucht der Browser
-  eine deutsche Stimme (macOS/Windows i. d. R. vorhanden; unter Linux
-  `speech-dispatcher` + Sprachpaket, Firefox nutzt die Systemstimmen).
-* **Erste Ansage**: Chrome kann Sprachausgabe ohne Nutzerinteraktion blockieren.
-  NestrisHomie spricht deshalb nach der ersten Klick-/Tastaturinteraktion eine
-  stumme Testansage („Freischalten").
-* **Kein Ton?** Prüfen, ob im Panel die richtige *Sprache* und *Stimme* gewählt
-  ist und die Systemlautstärke stimmt; mit **Ansage testen** direkt testen.
+Die Statuszeile im Panel zeigt unterhalb der Spieldaten immer eine
+**Sprach-Diagnosezeile**, z. B. `Sprache: Anna (de-DE)` oder einen konkreten
+Hinweis. In der Konsole liefert `NestrisHomie.speechInfo()` dieselben Daten:
+
+| Feld | Bedeutung |
+| --- | --- |
+| `voiceCount` | Anzahl gefundener Systemstimmen. `0` heißt: der Browser kann gar nicht sprechen (Linux: `speech-dispatcher` + Sprachpaket prüfen; sonst System-TTS aktivieren). |
+| `voice` | Gewählte Stimme, z. B. `Anna (de-DE)` |
+| `lastError` | Letzter Browserfehler, z. B. `not-allowed` (Autoplay-Schutz) oder `no-match` (keine passende Stimme) |
+| `needsGesture` | `true`, solange der Browser die Ausgabe noch blockiert – einmal auf die Seite klicken genügt |
+| `hinweis` | Klartext-Empfehlung für die aktuelle Situation |
+
+Die häufigsten Ursachen:
+
+1. **Autoplay-Schutz** (`needsGesture: true`): Chrome blockiert Sprache ohne
+   Interaktion. Einmal klicken oder eine Taste drücken – NestrisHomie wiederholt
+   die betroffene Ansage automatisch.
+2. **Keine Stimmen** (`voiceCount: 0`): Das System liefert dem Browser keine
+   Text-to-Speech-Stimme; das Skript kann daran nichts ändern.
+3. **Falsche Stimme/Sprache im Panel**: `no-match` – im Panel Stimme auf
+   *Automatisch* stellen oder eine passende wählen.
 
 ## Einschränkungen
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.1.0
+// @version      0.2.0
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Spiel-/Matchende, Trophäen).
 // @author       NestrisHomie
@@ -113,6 +113,14 @@
     let startedAt = 0;
     let current = null;
     let voices = [];
+    /** Zeitpunkt des letzten cancel() – schützt vor Chromes speak()-Race. */
+    let lastCancelAt = 0;
+    /** Letzter Sprachfehler des Browsers, z. B. 'not-allowed' oder 'no-match'. */
+    let lastError = null;
+    /** Annage, die nach einer Nutzergeste automatisch wiederholt wird. */
+    let retryItem = null;
+    /** true, solange der Browser Sprache ohne Nutzergeste blockiert. */
+    let needsGesture = false;
 
     function refreshVoices() {
       if (!supported) return;
@@ -153,10 +161,27 @@
         queue = queue.filter((item) => item.kind !== 'periodic');
         queue.unshift({ text, kind });
       }
-      if (interrupt && speechSynthesis.speaking) {
-        speechSynthesis.cancel();
-        busy = false;
-        current = null;
+      if (interrupt) {
+        if (speechSynthesis.speaking) {
+          try {
+            speechSynthesis.cancel();
+          } catch (err) {
+            /* ignorieren */
+          }
+          busy = false;
+          current = null;
+        }
+        // Chrome verschluckt speak(), das direkt auf cancel() folgt – auch wenn
+        // speechSynthesis.speaking bereits wieder false meldet. Deshalb immer
+        // kurz warten, wenn unterbrochen wird.
+        lastCancelAt = Date.now();
+        setTimeout(pump, 80);
+        return;
+      }
+      // Kurz nach einem cancel() ebenfalls verzögern (defensiv).
+      if (Date.now() - lastCancelAt < 120) {
+        setTimeout(pump, 80);
+        return;
       }
       pump();
     }
@@ -198,8 +223,23 @@
         current = null;
         setTimeout(pump, 60);
       };
+      utter.onstart = () => {
+        // Sprache funktioniert – etwaige Sperre ist behoben.
+        needsGesture = false;
+      };
       utter.onend = done;
-      utter.onerror = done;
+      utter.onerror = (ev) => {
+        const name = (ev && ev.error) || 'unbekannt';
+        lastError = { name, text: item.text, at: Date.now() };
+        console.warn(LOG, `Sprachfehler "${name}" bei Ansage:`, item.text);
+        if (name === 'not-allowed' || name === 'forbidden') {
+          // Browser-Autoplay-Sperre: Ansage merken und nach der nächsten
+          // Nutzergeste automatisch erneut versuchen.
+          needsGesture = true;
+          retryItem = item;
+        }
+        done();
+      };
       speechSynthesis.speak(utter);
     }
 
@@ -227,7 +267,33 @@
       }, 1000);
     }
 
-    return { say, clearPending, stop, refreshVoices, pickVoice, getVoices: () => voices, supported };
+    /** Kurzdiagnose für Statuszeile und Konsole. */
+    function getInfo() {
+      return {
+        supported,
+        voiceCount: voices.length,
+        voice: pickVoice(),
+        lastError,
+        needsGesture,
+        busy,
+        queueLength: queue.length,
+        speaking: supported ? speechSynthesis.speaking : false,
+        paused: supported ? speechSynthesis.paused : false,
+      };
+    }
+
+    /** Nach einer Nutzergeste: gescheiterte Ansage erneut versuchen. */
+    function retryFailed() {
+      if (!needsGesture || !retryItem) return false;
+      const item = retryItem;
+      retryItem = null;
+      needsGesture = false;
+      console.log(LOG, 'Versuche gescheiterte Ansage erneut:', item.text);
+      say(item.text, { kind: item.kind });
+      return true;
+    }
+
+    return { say, clearPending, stop, refreshVoices, pickVoice, getVoices: () => voices, getInfo, retryFailed, supported };
   })();
 
   function clamp(n, min, max) {
@@ -850,7 +916,32 @@
     panel.querySelector('[data-action="close"]').addEventListener('click', () => root.classList.remove('open'));
     panel.querySelector('[data-action="test"]').addEventListener('click', () => {
       unlockSpeech();
+      const info = TTS.getInfo();
+      if (!info.supported) {
+        ui.updateStatus('Status: Sprachausgabe wird von diesem Browser nicht unterstützt.');
+        return;
+      }
+      if (info.voiceCount === 0) {
+        ui.updateStatus(
+          'Status: Der Browser hat KEINE Sprachstimmen geliefert.\n' +
+            'Die Ansage kann deshalb nicht funktionieren.',
+        );
+        return;
+      }
       TTS.say(t('test'), { kind: 'event', interrupt: true });
+      // Nach kurzer Zeit zeigen, ob der Browser die Ansage tatsächlich angenommen hat.
+      setTimeout(() => {
+        const after = TTS.getInfo();
+        if (after.lastError && Date.now() - after.lastError.at < 3000) {
+          ui.updateStatus(`Status: Testansage fehlgeschlagen (Fehler: ${after.lastError.name}).`);
+        } else if (after.needsGesture) {
+          ui.updateStatus('Status: Browser hat die Ausgabe noch blockiert – bitte einmal auf die Seite klicken.');
+        } else {
+          ui.updateStatus(
+            `Status: Testansage gesprochen.\n${speechStatusText()}`,
+          );
+        }
+      }, 1200);
     });
 
     // -- Anzeige --
@@ -910,18 +1001,39 @@
    * ============================================================ */
 
   let speechUnlocked = false;
+  /** @type {null | (() => void)} */
+  let speechGestureHandler = null;
 
-  /** Chrome kann Sprachausgabe ohne Nutzerinteraktion blockieren. */
+  function removeSpeechGestureListeners() {
+    if (!speechGestureHandler) return;
+    ['pointerdown', 'keydown', 'click'].forEach((evt) =>
+      window.removeEventListener(evt, speechGestureHandler),
+    );
+    speechGestureHandler = null;
+  }
+
+  /**
+   * Chrome blockiert Sprachausgabe ohne vorherige Nutzergeste (Autoplay-Schutz).
+   * Wir "entlocken" sie mit einer unhörbaren Ansage und wiederholen danach
+   * eine gescheiterte Ansage automatisch.
+   */
   function unlockSpeech() {
-    if (speechUnlocked || !TTS.supported) return;
-    speechUnlocked = true;
-    try {
-      const u = new SpeechSynthesisUtterance(' ');
-      u.volume = 0;
-      speechSynthesis.speak(u);
-    } catch (err) {
-      /* ignorieren */
+    if (!TTS.supported) return;
+    if (!speechUnlocked) {
+      speechUnlocked = true;
+      try {
+        const u = new SpeechSynthesisUtterance(' ');
+        u.volume = 0;
+        speechSynthesis.speak(u);
+      } catch (err) {
+        /* ignorieren */
+      }
+      console.log(LOG, 'Sprachausgabe nach Nutzergeste freigeschaltet');
     }
+    if (TTS.retryFailed()) updateStatusLine();
+    // Läuft die Sprache, brauchen wir die Gesten-Listener nicht mehr.
+    const info = TTS.getInfo();
+    if (!info.needsGesture && !info.busy) removeSpeechGestureListeners();
   }
 
   function pollScores() {
@@ -936,26 +1048,43 @@
     updateStatusLine();
   }
 
+  /** Kurzbeschreibung des Sprachzustands für die Statuszeile. */
+  function speechStatusText() {
+    const info = TTS.getInfo();
+    if (!info.supported) return 'Sprache: wird vom Browser nicht unterstützt';
+    if (info.voiceCount === 0) {
+      return 'Sprache: KEINE Stimmen gefunden – Browser-Text-to-Speech prüfen';
+    }
+    const voice = info.voice ? `${info.voice.name} (${info.voice.lang})` : 'Standardstimme';
+    let line = `Sprache: ${voice}`;
+    if (info.needsGesture) line += ' · ⚠ bitte einmal klicken (Autoplay-Schutz)';
+    else if (info.lastError && Date.now() - info.lastError.at < 15000) {
+      line += ` · ⚠ Fehler: ${info.lastError.name}`;
+    }
+    return line;
+  }
+
   function updateStatusLine() {
     if (!ui.updateStatus) return;
     if (!settings.enabled) {
-      ui.updateStatus('Status: deaktiviert');
+      ui.updateStatus(`Status: deaktiviert\n${speechStatusText()}`);
       return;
     }
     if (!inRoom()) {
-      ui.updateStatus('Status: kein Match (warte auf Raum)');
+      ui.updateStatus(`Status: kein Match (warte auf Raum)\n${speechStatusText()}`);
       return;
     }
     const s = state.scores;
     const role = state.roomStatus === 'spectator' ? 'Zuschauer' : 'Spieler';
     if (!s) {
-      ui.updateStatus(`Status: ${state.status || '–'} · ${role} · keine Spieldaten`);
+      ui.updateStatus(`Status: ${state.status || '–'} · ${role} · keine Spieldaten\n${speechStatusText()}`);
       return;
     }
     const diff = s.diff === null ? '–' : (s.diff > 0 ? '+' : '') + s.diff;
     ui.updateStatus(
       `Status: ${state.status || '–'} · ${role}\n` +
-        `Du: ${s.myScore ?? '–'} · Gegner: ${s.oppScore ?? '–'} · Differenz: ${diff}`,
+        `Du: ${s.myScore ?? '–'} · Gegner: ${s.oppScore ?? '–'} · Differenz: ${diff}\n` +
+        speechStatusText(),
     );
   }
 
@@ -1046,8 +1175,12 @@
       setInterval(pollScores, 400);
       setInterval(guessStatusFromDom, 1000);
 
-      ['pointerdown', 'keydown'].forEach((evt) =>
-        window.addEventListener(evt, unlockSpeech, { once: true, passive: true }),
+      // Bleiben aktiv (statt once), bis die Sprachausgabe tatsächlich läuft:
+      // erst dann kann eine nach Autoplay-Sperre gescheiterte Ansage erneut
+      // versucht werden.
+      speechGestureHandler = () => unlockSpeech();
+      ['pointerdown', 'keydown', 'click'].forEach((evt) =>
+        window.addEventListener(evt, speechGestureHandler, { passive: true }),
       );
 
       console.log(LOG, 'gestartet', {
@@ -1071,11 +1204,33 @@
       return settings;
     },
     setSettings: updateSettings,
-    say: (text) => TTS.say(String(text), { kind: 'event', interrupt: true }),
+    say: (text, opts = {}) => TTS.say(String(text), { kind: 'event', interrupt: true, ...opts }),
     readScores,
     deWords,
     /** Vorschau der nächsten Statusansage (Konsolen-Hilfe). */
     previewAnnouncement: () => periodicText(),
+    /**
+     * Sprach-Diagnose für die Browserkonsole:
+     *   NestrisHomie.speechInfo()
+     * Liefert Stimmenanzahl, gewählte Stimme und den letzten Browserfehler.
+     */
+    speechInfo: () => {
+      const info = TTS.getInfo();
+      return {
+        ...info,
+        voice: info.voice ? `${info.voice.name} (${info.voice.lang})` : null,
+        hinweis:
+          !info.supported
+            ? 'Browser unterstützt speechSynthesis nicht.'
+            : info.voiceCount === 0
+              ? 'Keine Stimmen vorhanden: im Browser/TTS-System nachsehen (z. B. Sprachausgabe aktiviert?).'
+              : info.needsGesture
+                ? 'Autoplay-Schutz: einmal auf die Seite klicken.'
+                : 'Sprachausgabe sollte funktionieren.',
+      };
+    },
+    /** Test der Wiederholung nach Autoplay-Sperre (siehe speechInfo().needsGesture). */
+    retryFailedSpeech: () => TTS.retryFailed(),
   };
 
   start();

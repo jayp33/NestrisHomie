@@ -173,6 +173,8 @@ class FakeUtterance {
     this.pitch = 1;
     this.volume = 1;
     this.lang = 'de-DE';
+    this.voice = null;
+    this.onstart = null;
     this.onend = null;
     this.onerror = null;
   }
@@ -181,6 +183,9 @@ class FakeUtterance {
 const fakeSpeech = {
   speaking: false,
   paused: false,
+  // 'ok' = liefert onend, 'error' = ruft onerror mit errorFlag
+  mode: 'ok',
+  errorFlag: 'not-allowed',
   getVoices: () => [{ name: 'Teststimme', lang: 'de-DE', voiceURI: 'de-test' }],
   addEventListener() {},
   cancel() {
@@ -191,10 +196,21 @@ const fakeSpeech = {
   speak(utter) {
     spoken.push(utter.text);
     this.speaking = true;
+    const mode = this.mode;
     setTimeout(() => {
       this.speaking = false;
-      if (utter.onend) utter.onend();
+      if (mode === 'error') {
+        if (utter.onerror) utter.onerror({ error: this.errorFlag });
+      } else {
+        if (utter.onstart) utter.onstart();
+        if (utter.onend) utter.onend();
+      }
     }, 5);
+  },
+  /** Startet eine laufende Ansage nicht – simuliert den Fehlerfall. */
+  fireError(flag) {
+    this.mode = 'error';
+    this.errorFlag = flag;
   },
 };
 
@@ -403,6 +419,56 @@ async function run() {
   socket.fire(JSON.stringify({ type: 'in_room_status', status: 'none' }));
   await sleep(80);
   check('Status zurückgesetzt', api.state.status === null);
+
+  console.log('9. Sprach-Diagnose und Fehlerbehandlung');
+  const info0 = api.speechInfo();
+  check(
+    'speechInfo() liefert Stimmenanzahl',
+    info0 && typeof info0.voiceCount === 'number',
+    JSON.stringify(info0),
+  );
+  check('speechInfo() meldet keine Sperre', info0.needsGesture === false);
+  check('speechInfo() kennt keinen Fehler', info0.lastError === null);
+  check(
+    'speechInfo()-Hinweis passend zur Situation',
+    /funktionieren/.test(info0.hinweis),
+    info0.hinweis,
+  );
+
+  // Browserfehler "not-allowed" (Autoplay-Schutz) wird erfasst und als
+  // Sperre markiert – die Ansage darf dabei nicht verloren gehen.
+  // Achtung: Wegen der speak()-Verzögerng (Chrome-Race) muss hier kurz
+  // gewartet werden, bis der Fake-Fehler tatsächlich gemeldet ist.
+  spoken.length = 0;
+  fakeSpeech.fireError('not-allowed');
+  api.say('Testansage nach Sperre');
+  await sleep(300);
+  const infoErr = api.speechInfo();
+  check('Browserfehler erfasst', infoErr.lastError && infoErr.lastError.name === 'not-allowed',
+    JSON.stringify(infoErr.lastError));
+  check('Sperre markiert (needsGesture)', infoErr.needsGesture === true);
+
+  // Nach Nutzergeste wird die Ansage erneut versucht.
+  fakeSpeech.mode = 'ok';
+  const retried = api.retryFailedSpeech();
+  await sleep(300);
+  check('Wiederholung nach Geste ausgelöst', retried === true);
+  check('Ansage nach Wiederholung gesprochen',
+    spoken.some((s) => s.includes('Testansage nach Sperre')), JSON.stringify(spoken));
+
+  console.log('10. Unterbrechung (cancel → speak)');
+  // Chrome verschluckt speak(), das direkt auf cancel() folgt – das Skript
+  // muss die Wiederholung verzögern (siehe say() mit interrupt: true).
+  spoken.length = 0;
+  fakeSpeech.mode = 'ok';
+  api.say('Erste Ansage');
+  await sleep(120); // Ausgabe läuft und ist abgeschlossen
+  api.say('Unterbrochene Ansage', { interrupt: true });
+  await sleep(200);
+  check('Unterbrochene Ansage wird nach Verzögerung gesprochen',
+    spoken.includes('Unterbrochene Ansage'), JSON.stringify(spoken));
+  check('Kein Rückstau alter Ansagen', spoken.filter((s) => s === 'Erste Ansage').length <= 1,
+    JSON.stringify(spoken));
 
   console.log('');
   if (failed === 0) {

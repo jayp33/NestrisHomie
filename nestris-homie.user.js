@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.6.0
+// @version      0.6.1
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
 //               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
@@ -1628,8 +1628,10 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       if (settings.announceStartEnd && prev !== STATUS.IN_GAME) {
         emitEvent(t('started', state.scores && state.scores.oppName));
       }
-      // glhf bei Matchbeginn (Issue #7)
-      sendChat('glhf');
+      // glhf bei Matchbeginn (Issue #7) – nur wenn neu ins IN_GAME gewechselt
+      if (prev !== STATUS.IN_GAME) {
+        sendChat('glhf');
+      }
       return;
     }
 
@@ -1639,8 +1641,10 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       TTS.clearPending('periodic');
       state.endedAt = Date.now();
 
-      // gg bei Matchende (Issue #7)
-      sendChat('gg');
+      // gg nur bei echtem Matchende (AFTER_MATCH/ABORTED), nicht bei Spielende (BEFORE_GAME)
+      if (next === STATUS.AFTER_MATCH || next === STATUS.ABORTED) {
+        sendChat('gg');
+      }
 
       if (next === STATUS.AFTER_MATCH) {
         announceMatchEnd(roomState);

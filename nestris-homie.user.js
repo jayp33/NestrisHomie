@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.6.1
+// @version      0.7.0
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
 //               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
@@ -70,6 +70,8 @@
     announceTopout: true,     // Chasedown/Sieg, sobald der Gegner topoutet
     topoutSec: 5,             // Stillstand der Gegneranzeige, der als Topout gilt
     eventGapSec: 6,           // Mindestabstand zwischen Event-Ansagen
+    // Runway (Lines-Differenz) ansagen, wenn >= 10 Reihen (Issue #5)
+    announceLines: true,
     // Sprach-Backend (Issue #4): 'auto' = lokaler neuronaler Server, sonst
     // Browser-Stimme; 'server' erzwingt den Server, 'browser' schließt ihn aus.
     ttsBackend: 'auto',
@@ -788,6 +790,8 @@
         delta > 0 ? `Plus ${fmt(delta)} Trophäen.` : `Minus ${fmt(-delta)} Trophäen.`,
       noData: () => 'Keine Spieldaten.',
       test: () => 'Sprachassistent ist bereit.',
+      linesAhead: (d) => `Du hast ${fmt(d)} Reihen mehr als der Gegner.`,
+      linesBehind: (d) => `Du hast ${fmt(d)} Reihen weniger als der Gegner.`,
     },
     en: {
       started: (opponent) => (opponent ? `Game against ${opponent} started.` : 'Game started.'),
@@ -817,6 +821,8 @@
       trophies: (delta) => (delta > 0 ? `Plus ${fmt(delta)} trophies.` : `Minus ${fmt(-delta)} trophies.`),
       noData: () => 'No game data.',
       test: () => 'Voice assistant is ready.',
+      linesAhead: (d) => `You have ${fmt(d)} more lines than opponent.`,
+      linesBehind: (d) => `You have ${fmt(d)} fewer lines than opponent.`,
     },
   };
 
@@ -936,6 +942,20 @@ function readSeries(side) {
   if (!/^\\d+(\\.5)?$/.test(text)) return null;
   return Number.parseFloat(text);
 }
+function readSideLines(side) {
+  if (!side) return null;
+  const panels = side.querySelectorAll('app-nes-panel');
+  for (const panel of panels) {
+    const labelEl = panel.querySelector('p');
+    const label = labelEl ? labelEl.textContent.trim() : '';
+    if (label !== 'Lines') continue;
+    for (const h of panel.querySelectorAll('h1')) {
+      const v = parseScoreText(h.textContent);
+      if (v !== null) return v;
+    }
+  }
+  return null;
+}
 function readCountdownText() {
   const el = document.querySelector('${PAGE_DOM_SEL.sideMe} ${PAGE_DOM_SEL.countdown}');
   return el ? el.textContent.trim() : null;
@@ -948,6 +968,8 @@ function readScores() {
   const myScore = readSideScore(me);
   let oppScore = readSideScore(opp);
   const diff = readDiff(me);
+  const myLines = readSideLines(me);
+  const oppLines = readSideLines(opp);
 
   if (oppScore === null && myScore !== null && diff !== null) oppScore = myScore - diff;
 
@@ -959,6 +981,8 @@ function readScores() {
     oppName: readUsername(opp),
     mySeries: readSeries(me),
     oppSeries: readSeries(opp),
+    myLines,
+    oppLines,
   };
 }
 function fnv(str) {
@@ -1350,6 +1374,22 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     countdown: 'h1.countdown',
   };
 
+  /** Liest Lines (Reihen) aus dem Side-Panel. */
+  function readSideLines(side) {
+    if (!side) return null;
+    const panels = side.querySelectorAll('app-nes-panel');
+    for (const panel of panels) {
+      const labelEl = panel.querySelector('p');
+      const label = labelEl ? labelEl.textContent.trim() : '';
+      if (label !== 'Lines') continue;
+      for (const h of panel.querySelectorAll('h1')) {
+        const v = parseScoreText(h.textContent);
+        if (v !== null) return v;
+      }
+    }
+    return null;
+  }
+
   function qs(root, selector) {
     return root && typeof root.querySelector === 'function' ? root.querySelector(selector) : null;
   }
@@ -1413,6 +1453,8 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     const myScore = readSideScore(me);
     let oppScore = readSideScore(opp);
     const diff = readDiff(me);
+    const myLines = readSideLines(me);
+    const oppLines = readSideLines(opp);
 
     // Fallback: der Gegner-Score steckt auch in der Differenz des eigenen Panels.
     if (oppScore === null && myScore !== null && diff !== null) oppScore = myScore - diff;
@@ -1425,6 +1467,8 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       oppName: readUsername(opp),
       mySeries: readSeries(me),
       oppSeries: readSeries(opp),
+      myLines,
+      oppLines,
     };
   }
 
@@ -1731,6 +1775,15 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
         text += ' ' + t('series', s.mySeries, s.oppSeries);
       }
     }
+    // Runway-Unterschied (Lines) ansagen, wenn >= 10 Reihen Differenz (Issue #5)
+    if (settings.announceLines && s.myLines !== null && s.oppLines !== null) {
+      const linesDiff = s.myLines - s.oppLines;
+      if (linesDiff >= 10) {
+        text += ' ' + t('linesAhead', linesDiff);
+      } else if (linesDiff <= -10) {
+        text += ' ' + t('linesBehind', -linesDiff);
+      }
+    }
     return text;
   }
 
@@ -1958,6 +2011,7 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       <label class="row"><span>Spielstart / -ende</span><input type="checkbox" data-key="announceStartEnd"></label>
       <label class="row"><span>Chasedown / Sieg ansagen</span><input type="checkbox" data-key="announceTopout"></label>
       <label class="row"><span>Chat: glhf / gg</span><input type="checkbox" data-key="announceChat"></label>
+      <label class="row"><span>Runway (Reihen) ansagen</span><input type="checkbox" data-key="announceLines"></label>
       <label class="row"><span>Topout erkennen nach</span>
         <input type="number" min="3" max="60" step="1" data-key="topoutSec"> Sek. Stillstand</label>
       <label class="row"><span>Spielstand ansagen</span><input type="checkbox" data-key="announceSeries"></label>

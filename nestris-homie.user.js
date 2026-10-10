@@ -1015,11 +1015,24 @@ function sideSignature(side) {
     if (texts.length) parts.push(label + '=' + texts.join('/'));
   });
 
+  // Board-Canvas-Hash nur bei Bedarf (Chasedown) und gedrosselt (alle 1,5 s)
+  // um Hauptthread nicht zu blockieren. Das Board ist der größte Canvas,
+  // getImageData() alle 400 ms ruckelt sonst die Seite.
   const board = qs(side, 'app-nes-board');
   if (board) {
     const canvas = qs(board, 'canvas');
     const markup = board.innerHTML || '';
-    const hash = canvas ? canvasHash(canvas) : markup ? fnv(markup) : null;
+    // Billiger Markup-Hash als Fallback (ohne getImageData)
+    let hash = markup ? fnv(markup) : null;
+    // Echter Canvas-Hash nur alle ~1,5 s und nur wenn oppFast schon true ist
+    // (dann läuft Chasedown-Erkennung und wir brauchen Bestätigung)
+    const now = Date.now();
+    if (canvas && typeof side._lastBoardHash === 'undefined') side._lastBoardHash = 0;
+    if (canvas && now - (side._lastBoardHash || 0) > 1500) {
+      const realHash = canvasHash(canvas);
+      if (realHash) hash = realHash;
+      side._lastBoardHash = now;
+    }
     if (hash) {
       parts.push('board=' + hash);
       fast = true;
@@ -1455,7 +1468,16 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     if (board) {
       const canvas = qs(board, 'canvas');
       const markup = board.innerHTML || '';
-      const hash = canvas ? canvasHash(canvas) : markup ? fnv(markup) : null;
+      // Board-Canvas-Hash gedrosselt (alle ~1,5 s) um Hauptthread zu schonen.
+      // Billiger Markup-Hash als Fallback, echter Canvas-Hash nur im Intervall.
+      let hash = markup ? fnv(markup) : null;
+      const now = Date.now();
+      if (canvas && typeof side._lastBoardHash === 'undefined') side._lastBoardHash = 0;
+      if (canvas && now - (side._lastBoardHash || 0) > 1500) {
+        const realHash = canvasHash(canvas);
+        if (realHash) hash = realHash;
+        side._lastBoardHash = now;
+      }
       if (hash) {
         parts.push('board=' + hash);
         fast = true; // Minos/aktives Piece ändern sich im Spiel ständig

@@ -298,15 +298,16 @@ Nach einem Redeploy von nestris.org gilt:
 5. **Seed-Anzeige (Issue #10):** Das Regex `Seed[:\s]*([0-9a-f]{6})` in
    `readOwnSeed()` hängt am Layout, nicht an einem Selektor. Verändert die
    Seite die Seed-Darstellung (z. B. andere Breite, ein eigenes Element mit
-   Klasse), zeigt das Overlay `–`. Das Overlay wird immer aus dem
-   **Hauptskript** heraus gefüllt (`showSeedLevelOverlay()` → `readOwnSeed()`),
-   unabhängig vom Ausführungsmodus – reines Textlesen im DOM ist aus der
-   Sandbox heraus unschädlich (im Gegensatz zu Canvas-Zugriffen, Issue #6).
-   Hinweis für Änderungen: Im Injektions-Skript (`PAGE_FN_DEFS`) existiert eine
-   **zweite, derzeit ungenutzte** Kopie von `readOwnSeed()` mit dem älteren,
-   weiteren Regex `Seed[:\s]*(\d+)`. Wird der Seed künftig in der Seitenwelt
-   gelesen und über `PAGE_STATE_EVENT` geschickt, muss diese Kopie ebenfalls
-   `[0-9a-f]{6}` verwenden – sonst bricht sie Hex-Seeds nach den Ziffern ab.
+   Klasse), zeigt das Overlay `–`. Das Overlay wird aus dem **Hauptskript**
+   heraus gefüllt (`showSeedLevelOverlay()` → `readOwnSeed()`), unabhängig
+   vom Ausführungsmodus – reines Textlesen im DOM ist aus der Sandbox heraus
+   unschädlich (im Gegensatz zu Canvas-Zugriffen, Issue #6). Der Seed steht
+   nur in **einer** Codekopie: Das Injektions-Skript (`PAGE_FN_DEFS`) hatte
+   früher eine zweite, ungenutzte Kopie mit dem weiteren Regex
+   `Seed[:\s]*(\d+)`; sie wurde entfernt, weil sie Hex-Seeds nach den
+   Ziffern abgebrochen hätte. Wird der Seed künftig doch in der Seitenwelt
+   gelesen und über `PAGE_STATE_EVENT` geschickt, muss das Muster
+   `[0-9a-f]{6}` verwenden.
 
 ## 6. Rechtlicher/Hinweis
 

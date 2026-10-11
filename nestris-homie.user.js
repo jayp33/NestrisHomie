@@ -980,21 +980,6 @@ function readPanelValue(panel) {
   }
   return null;
 }
-function readOwnSeed() {
-  const me = document.querySelector('${PAGE_DOM_SEL.sideMe}');
-  if (!me) return null;
-  const board = qs(me, 'app-nes-board');
-  if (board) {
-    const allText = board.textContent || '';
-    const seedMatch = allText.match(/Seed[:\s]*(\d+)/i);
-    if (seedMatch) return seedMatch[1];
-  }
-  const ownArea = qs(me, '.my-game') || me;
-  const allText2 = ownArea.textContent || '';
-  const seedMatch2 = allText2.match(/Seed[:\s]*(\d+)/i);
-  if (seedMatch2) return seedMatch2[1];
-  return null;
-}
 function readCountdownText() {
   const el = document.querySelector('${PAGE_DOM_SEL.sideMe} ${PAGE_DOM_SEL.countdown}');
   return el ? el.textContent.trim() : null;

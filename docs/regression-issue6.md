@@ -1,10 +1,12 @@
 # Regression seit v0.5.0: Spielstart wird nicht erkannt (Issue #6)
 
-**Stand: 2026-10-10.** Die Recherche ist hier pausiert ("erstmal nur Doku").
-Dieser Text hält den Diagnosestand fest, damit die Sache ohne erneutes
-Bisektieren aufgenommen werden kann. Code-Fix bewusst ausstehend.
+**Stand: 2026-10-10.** Der folgende Text (Abschnitte 1–8) hält den
+Diagnosestand zum Zeitpunkt der Recherche fest, damit die Sache ohne erneutes
+Bisektieren nachvollziehbar bleibt.
 
-**Update 2026-10-10 (v0.5.3):** Fix implementiert und getestet. Siehe Abschnitt 9.
+**Update 2026-10-10 (v0.5.3):** Fix implementiert und getestet – der Fix
+hebt den Hinweis „Code-Fix bewusst ausstehend" aus dem ursprünglichen Stand
+auf. Siehe Abschnitt 9.
 
 Testbedingungen durchgängig: **Chromium (Vivaldi) mit Tampermonkey**,
 nestris.org, Ranglisten-1v1 mit Capture/OCR.

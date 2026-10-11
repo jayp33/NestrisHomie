@@ -1,6 +1,6 @@
 {
   "name": "nestris-homie",
-  "version": "0.1.0",
+  "version": "0.9.1",
   "private": true,
   "description": "Sprachassistent (Userscript) für 1v1-Matches auf nestris.org",
   "scripts": {

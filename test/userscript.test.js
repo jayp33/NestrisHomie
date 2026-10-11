@@ -11,6 +11,9 @@
  *   6. Führungswechsel wird erkannt und angesagt
  *   6c. Chasedown: Gefriert die Gegneranzeige während das eigene Spiel
  *       weiterläuft, wird "Der Gegner ist raus!" angesagt (Sieg bzw. Lücke)
+ *   5c. Levelwechsel-Warnung bei 90/120 Lines (Issue #11): gilt pro Spiel,
+ *       nur aufsteigende Flanke, abschaltbar, überlebt den Ereignisabstand
+ *       und funktioniert auch über die Injektions-Brücke (Schritt 12)
  *   7. AFTER_MATCH erzeugt die Match-Ende-Ansage (über den Spielstand)
  *   8. trophy_change wird angesagt
  *   11. Lokales TTS-Backend (Issue #4): Server-Aktivierung per /health,

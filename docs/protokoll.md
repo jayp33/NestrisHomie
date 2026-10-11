@@ -6,6 +6,9 @@ Grundlage für das Userscript. **Es gibt keine offizielle öffentliche API** –
 hier ist beobachtetes Verhalten und kann sich mit jedem Deployment ändern.
 
 Stand: 2026-10-07 (letztes Bundle, das ich analysiert habe).
+Ergänzt am 2026-10-11 um die Beobachtungen aus Issue #10 (Seed),
+Issue #7 (Chat senden) und Issue #5 (Lines/Runway); die JS-Bundle-Analyse
+selbst ist weiter die vom 2026-10-07.
 
 ---
 
@@ -53,6 +56,7 @@ Für uns relevant:
 | `room_state_update` | `{state: {...}}` | Zustandswechsel mitten im Match |
 | `found_opponent` | – | „Gegner gefunden" nach der Warteschlange |
 | `trophy_change` | `{startTrophies, trophyDelta, queueType}` | Trophäenbilanz nach Ranked-Match |
+| `chat` | `{message, …}` | eingehende Chatnachrichten; **senden** geht mit `{type: "chat", message}` über denselben Socket (Issue #7) |
 
 ### 2.2 Room-State-Felder (`state`)
 
@@ -77,6 +81,12 @@ wonByResignation bool
 `points` ist die Quelle für den **Spielstand** (Siege) – dieselbe Berechnung wie
 im Frontend (`count(winner === myIndex)`, Remis zählt 0.5 für beide).
 Der eigene Index ergibt sich über den Vergleich des Usernamens mit dem DOM.
+
+**Kein `seed` im `roomState`** (nachgeprüft für Issue #10): Es gibt kein
+Feld `seed` in irgendeiner der empfangenen `roomState`-Varianten – weder in
+`in_room_status` noch in `room_state_update`. Der Seed steht nur im **DOM des
+eigenen Boards** (Abschnitt 3); das Userscript liest ihn deshalb mit
+`readOwnSeed()` von dort.
 
 ### 2.3 Kein vorzeitiges Topout-Signal (Chasedown)
 
@@ -169,6 +179,14 @@ Wichtige Details:
 * **`.side.me` / `.side.opponent`** – zuverlässigste Unterscheidung, unabhängig
   von der Reihenfolge der Spieler (`getPlayerIndices()` vertauscht sie je nach
   eigener Seite) und unabhängig vom Layout.
+* **Seed-Anzeige (Issue #10):** Vor dem Matchbeginn rendert der eigene
+  `app-nes-board`-Bereich ein Element mit dem Text `Seed: <6-stellig hex>`
+  (z. B. `Seed: 4f2a9c`). Es gehört nicht zu den `app-nes-panel`s und hat
+  keine eigene Klasse, über die man es gezielt greifen könnte – darum
+  durchsucht `readOwnSeed()` die Textinhalte von `app-nes-board` bzw.
+  `.my-game` auf der eigenen Seite nach dem Muster
+  `Seed[:\s]*([0-9a-f]{6})`. Vor dem Spiel ist der Seed sichtbar; danach
+  verschwindet die Anzeige.
 * **Level und Lines** liegen in `div.level-lines` als eigene `app-nes-panel`s
   (`.level-panel` / `.lines-panel`), jeweils `p` = Label, `h1` = Wert. Solange
   keine Daten vorliegen, rendert das Panel `-` – `parseScoreText()` liefert
@@ -235,8 +253,28 @@ Daraus lässt sich der Spielstatus ohne WebSocket grob rekonstruieren
    Netz (audio.cpp + Supertonic auf `127.0.0.1:8099`, siehe README
    „Sprachausgabe über einen lokalen TTS-Server"). Weil nestris.org HTTPS
    und der Server HTTP spricht, läuft der Serverzugriff privilegiert über
-   `GM_xmlhttpRequest`; deshalb nutzt das Skript Grants und hängt den
-   WebSocket-Hook an `unsafeWindow` statt `window` (Konstante `pageWin`).
+   `GM_xmlhttpRequest`. Der WebSocket-Hook hängt dagegen **nicht** an
+   `unsafeWindow`: Es gibt keinen `@grant unsafeWindow` mehr (seit v0.5.2,
+   Issue #6) und keine `pageWin`-Konstante. Der Proxy wird je nach
+   Ausführungskontext an `window.WebSocket` gehängt – im Seitenkontext
+   direkt, in der Sandbox über das injizierte Inline-Skript; die
+   Socket-Referenz landet in `state.socket` (Sandbox) bzw.
+   `window.__nestrisHomieSocket` (Injektion).
+7. **Chat-Nachrichten (Issue #7):** Bei Matchbeginn wird `glhf`, bei
+   Matchende `gg` als `{type: "chat", message}` über denselben Socket
+   gesendet, den auch die Seite benutzt – der einzige schreibende Zugriff
+   des Skripts. In der Sandbox geht der Weg über ein CustomEvent
+   (`nestris-homie-send-chat`) an das injizierte Skript, das den Socket
+   hält; im Seitenkontext direkt über `state.socket`. Gesendet wird nur,
+   wenn der Socket offen ist (`readyState === 1`).
+8. **Seed/Level-Overlay (Issue #10):** Sobald im Status `BEFORE_GAME` ein
+   `startLevel` vorliegt, rendert die Bedienoberfläche ein zentriertes
+   Overlay mit `startLevel` (aus `roomState`) und dem Seed (aus dem DOM,
+   Abschnitt 3). Es wird ausgeblendet, wenn der eigene Eintrag im
+   `ready`-Array `true` wird oder der Status auf `IN_GAME` wechselt.
+9. **Runway (Issue #5):** Die Intervallansage nennt auf Wunsch zusätzlich den
+   Abstand in Reihen, sobald er mindestens 10 beträgt
+   (`… Reihen mehr/weniger als der Gegner`).
 
 ## 5. Wartung / Was bei Änderungen zu prüfen ist
 
@@ -257,9 +295,24 @@ Nach einem Redeploy von nestris.org gilt:
    Warnlogik sie sieht – im Injektions-Modus also den Wert aus der Brücke.
 4. Falls die JSON-Typen sich ändern: im Bundle nach `t.PING="ping"` suchen –
    dort steht die vollständige Enum-Liste.
+5. **Seed-Anzeige (Issue #10):** Das Regex `Seed[:\s]*([0-9a-f]{6})` in
+   `readOwnSeed()` hängt am Layout, nicht an einem Selektor. Verändert die
+   Seite die Seed-Darstellung (z. B. andere Breite, ein eigenes Element mit
+   Klasse), zeigt das Overlay `–`. Das Overlay wird immer aus dem
+   **Hauptskript** heraus gefüllt (`showSeedLevelOverlay()` → `readOwnSeed()`),
+   unabhängig vom Ausführungsmodus – reines Textlesen im DOM ist aus der
+   Sandbox heraus unschädlich (im Gegensatz zu Canvas-Zugriffen, Issue #6).
+   Hinweis für Änderungen: Im Injektions-Skript (`PAGE_FN_DEFS`) existiert eine
+   **zweite, derzeit ungenutzte** Kopie von `readOwnSeed()` mit dem älteren,
+   weiteren Regex `Seed[:\s]*(\d+)`. Wird der Seed künftig in der Seitenwelt
+   gelesen und über `PAGE_STATE_EVENT` geschickt, muss diese Kopie ebenfalls
+   `[0-9a-f]{6}` verwenden – sonst bricht sie Hex-Seeds nach den Ziffern ab.
 
 ## 6. Rechtlicher/Hinweis
 
-Es handelt sich um eine private Lesehilfe ohne schreibenden Zugriff auf das Spiel
-(keine gesendeten Nachrichten, keine Spielvorteile). Die Analyse diente
-ausschließlich der Feature-Implementierung.
+Es handelt sich um eine private Lesehilfe. Das Skript liest den WebSocket-Strom
+und das DOM mit und greift nicht in den Spielverlauf ein (Brett, Pieces, Punkte
+bleiben unberührt). Die einzige schreibende Aktion ist das Senden der
+Chat-Nachrichten `glhf` / `gg` (Issue #7) – genau das, was ein Spieler auch per
+Hand tippen könnte. Die Analyse diente ausschließlich der
+Feature-Implementierung.

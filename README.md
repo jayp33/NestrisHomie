@@ -17,9 +17,12 @@ Zusätzlich kommen Events, wenn sich etwas Wesentliches tut.
 | --- | --- |
 | Vorsprung / Gleichstand / Rückstand (+ Differenz) | alle 30 s (Intervall frei wählbar) |
 | Beide Punktestände | optional, zusammen mit der Intervallansage |
+| Runway-Unterschied („… Reihen mehr/weniger als der Gegner") | optional, zur Intervallansage ab 10 Reihen Differenz (Issue #5) |
 | „Du übernimmst die Führung!" / „… Führung abgegeben" | sofort beim Führungswechsel |
 | „Der Gegner ist raus!" (Sieg sofort oder Chasedown mit Lücke) | wenn die Gegneranzeige einfriert, während du spielst |
 | „Achtung: 90/120 Linien erreicht – Levelwechsel bald!" | bei 90 und 120 eigenen Lines (Issue #11) |
+| „glhf" / „gg" im Chat | automatisch bei Matchbeginn bzw. Matchende (Issue #7) |
+| Seed/Level-Overlay | groß und zentriert vor dem Match, verschwindet bei „Ready" (Issue #10) |
 | Natürliche Stimme über einen lokalen TTS-Server (Supertonic) | optional, Auto-Erkennung; ohne Server übernimmt die Browser-Stimme |
 
 Die genannte **Differenz wird auf ganze Tausender gerundet**, damit die
@@ -119,6 +122,76 @@ NestrisHomie warnt deshalb vorher:
 Diagnose in der Browserkonsole: `NestrisHomie.levelInfo()` zeigt die
 gelesenen Lines, die Schwellen und welche davon schon angesagt wurden.
 
+### Runway-Unterschied (Issue #5)
+
+Wer mehr Reihen gespielt hat, hat in der Regel auch die klarere Sicht aufs
+Board – deshalb fließt der Abstand in Reihen optional in die Intervallansage
+ein:
+
+| Lines-Differenz | Angesagt |
+| --- | --- |
+| ab 10 mehr | „Du hast zwölf Reihen mehr als der Gegner." |
+| ab 10 weniger | „Du hast zwölf Reihen weniger als der Gegner." |
+
+* Gezählt werden wieder die **eigenen** Lines gegen die des Gegners, gelesen
+  aus den `.lines-panel`-Werten beider Seiten.
+* Die Schwelle (10 Reihen) ist absichtlich streng: Kleinigkeiten würden die
+  Intervallansage nur aufblähen.
+* Abschaltbar über die Einstellung **Runway (Reihen) ansagen**.
+
+### Chat: „glhf" / „gg" (Issue #7)
+
+Auf Wunsch schreibt NestrisHomie die Höflichkeiten des Chat-Alltags für dich:
+
+| Zeitpunkt | Nachricht |
+| --- | --- |
+| Matchbeginn (Statuswechsel auf `IN_GAME`) | `glhf` |
+| Matchende (`AFTER_MATCH` / `ABORTED`) | `gg` |
+
+* Gesendet wird **nur** bei Matchende – das Ende eines einzelnen Spiels
+  (`IN_GAME → BEFORE_GAME`) schickt nichts, sonst käme mitten im Match ein
+  `gg` (Bugfix in v0.6.1).
+* Die Nachricht ist die **einzige Schreibaktion** des Skripts: ein
+  `{type: "chat", message}` über denselben WebSocket, den die Seite auch
+  selbst benutzt. An der Spielmechanik ändert sich nichts.
+* Das funktioniert in beiden Ausführungsmodi: im Seitenkontext direkt über
+  den bereits gehookten Socket, im Injektions-Modus über ein CustomEvent an
+  das injizierte Skript (`window.__nestrisHomieSocket`).
+* Abschaltbar über die Einstellung **Chat: glhf / gg**.
+
+> **Bekannter Fehler (Issue #7, offen):** Die eigenen Nachrichten erscheinen
+> im Chat **ohne den eigenen Benutzernamen** davor – erwartet wird
+> `name: glhf`. Darum bleibt das Issue offen.
+
+### Seed/Level-Overlay (Issue #10)
+
+Vor dem Matchbeginn zeigt NestrisHomie ein großes, zentriertes Overlay mit
+den beiden Werten, die man vor dem Start wissen will:
+
+```
+        ┌─────────────────────────┐
+        │      Match-Info         │
+        │  Seed: 4f2a9c           │
+        │  Level: 5               │
+        │  Verschwindet automatisch, sobald du "Ready" klickst. │
+        └─────────────────────────┘
+```
+
+* Das Overlay erscheint im Status `BEFORE_GAME`, sobald ein `startLevel`
+  vorliegt, und verschwindet, sobald du **„Ready"** klickst oder das Match
+  beginnt (`IN_GAME`).
+* Der **Seed steht nicht im WebSocket-`roomState`** (ausprobiert, siehe
+  Issue #10) – er wird deshalb aus dem **DOM des eigenen Boards** gelesen
+  (`readOwnSeed()`, Suche nach `Seed:` im Bereich `app-nes-board` /
+  `.my-game`). Der Seed ist **immer sechsstellig hexadezimal**
+  (`[0-9a-f]{6}`); wird keiner gefunden, zeigt das Overlay `–`.
+* Abschaltbar über die Einstellung **Seed/Level Overlay**.
+
+> **Bekannter Fehler (Issue #10, offen):** Bricht man ein Match **ohne
+> „Ready"** ab und geht über *Exit* zurück zum Hauptscreen, bleibt das
+> Overlay stehen – es wird nur beim Ready-Klick und bei `IN_GAME`
+> geschlossen, nicht beim Verlassen des Raums.
+
 ### Events
 
 | Event | Auslöser |
@@ -128,6 +201,10 @@ gelesenen Lines, die Schwellen und welche davon schon angesagt wurden.
 | Matchergebnis + Spielstand (z. B. „zwei zu eins") | bei `AFTER_MATCH` |
 | Trophäenänderung („Plus drei Trophäen.") | kurz nach einem Ranked-Match |
 | „Gegner gefunden." | nach der Warteschlange |
+
+Die Chat-Nachrichten `glhf` / `gg` (Issue #7) sind **keine** Sprachansagen,
+sondern werden in den Chat **gesendet** – sie erscheinen deshalb nicht in
+der Liste der Events.
 
 Nicht angesagt wird im **Zuschauermodus** – NestrisHomie erkennt über die
 CSS-Klasse `.side.me`, ob du selbst spielst.
@@ -145,7 +222,7 @@ Damit die Seite trotz der Grants (für den optionalen TTS-Server) in Ruhe
 gelassen wird, fordert der Skript-Kopf den Seitenkontext an: `@sandbox raw`
 (Tampermonkey) bzw. `@inject-into page` (Violentmonkey); ein
 `@grant unsafeWindow` gibt es bewusst nicht mehr. **Auf Chromium setzt
-Tampermonkey das derzeit nicht um** (Stand v0.5.2, siehe Issue #6) – das
+Tampermonkey das derzeit nicht um** (Stand v0.9.1, siehe Issue #6) – das
 Skript läuft dann in einer Sandbox, hängt sich per Inline-Skript in die
 Seite ein und holt die Nachrichten über ein CustomEvent zurück. Die
 Statuszeile im Dialog zeigt den tatsächlichen Weg:
@@ -166,12 +243,16 @@ Danach erscheint unten rechts eine 🎙-Schaltfläche mit dem Einstellungsdialog
 | Führungswechsel ansagen | an | sofortige Meldung bei Führungswechsel |
 | Spielstart / -ende | an | Start, Spielergebnis, Matchende, Trophäen |
 | Chasedown / Sieg ansagen | an | „Gegner ist raus!" beim Topout des Gegners |
+| Chat: glhf / gg | an | Chatnachrichten bei Matchbeginn/-ende (Issue #7) |
+| Runway (Reihen) ansagen | an | Lines-Differenz ab 10 Reihen zur Intervallansage (Issue #5) |
 | Levelwechsel warnen (90/120) | an | „Achtung: 90/120 Linien erreicht" vor dem Levelwechsel |
+| Seed/Level Overlay | an | großes Overlay mit Seed und Level vor dem Match (Issue #10) |
 | Topout erkennen nach | 5 Sek. | Stillstand der Gegneranzeige, der als Topout gilt (3–60 s) |
 | Spielstand ansagen | aus | Siege-Serie in der Intervallansage |
 | Sprache | Deutsch | Ansagetexte `de` / `en` |
 | Stimme | Automatisch | konkrete Systemstimme |
 | Tempo / Lautstärke | 1,0 / 1,0 | `SpeechSynthesisUtterance.rate/.volume` |
+| Stimmhöhe (`pitch`) | 1,0 | nur Browser-Stimme (0,5–2,0), nicht im Panel – per Konsole: `NestrisHomie.setSettings({ pitch: 1.1 })` |
 | Sprach-Backend | Auto | `Auto` = lokaler TTS-Server, sonst Browser; `Server` erzwingt, `browser` schließt den Server aus |
 | TTS-Server | `http://127.0.0.1:8099` | Basis-URL des audio.cpp-Dienstes |
 | Server-Stimme | `M1` | Supertonic-Stimme des Servers |
@@ -179,7 +260,9 @@ Danach erscheint unten rechts eine 🎙-Schaltfläche mit dem Einstellungsdialog
 | Server-Timeout (`ttsTimeoutSec`) | 4 s | Antwortfrist des Servers, per Konsole änderbar |
 
 Alle Einstellungen liegen lokal in `localStorage` unter
-`nestris-homie.settings.v1` – keine Daten verlassen den Browser.
+`nestris-homie.settings.v1` – die **Konfiguration** verlässt den Browser
+nie. Die einzigen Daten, die das Skript nach draußen schickt, sind die
+Chat-Nachrichten `glhf` / `gg` (Issue #7) über den Spiel-Socket selbst.
 
 ## Architektur
 
@@ -200,10 +283,12 @@ nestris.org (Angular-SPA)
 │   .side.me  /  .side.opponent  │   │
 │   app-nes-panel.score-panel    ▼   ▼
 │   app-nes-panel.lines-panel ┌──────────────────────────┐
-│   h1 (Score), h1.diff       │  Ansage-Logik            │
-│                             │  • Intervall-Timer       │
+│   „Seed:“ (eigenes Board)   │  Ansage-Logik            │
+│   h1 (Score), h1.diff       │  • Intervall-Timer       │
 │                             │  • Lead-Change-Flow      │
+│                             │  • Runway (Reihen)       │
 │                             │  • Levelwechsel (90/120) │
+│                             │  • Chat: glhf / gg       │
 │                             │  • Start/End/Events      │
 │                             └──────────┬───────────────┘
 │                                    ▼
@@ -218,6 +303,11 @@ nestris.org (Angular-SPA)
                                 ▼       ▼  → 127.0.0.1:8099
                                        WAV-Blob → <audio>
 ```
+
+Der WebSocket dient nicht nur dem Lesen: Bei Matchbeginn bzw. Matchende
+schickt die Ansage-Logik `glhf` / `gg` über denselben Socket in den Chat
+(Issue #7) – im Seitenkontext direkt, sonst per CustomEvent über das
+injizierte Skript. Das ist die einzige Schreibaktion des Skripts.
 
 Warum **hybrid**? Die JSON-Ereignisse liefern den exakten Matchstatus, den man
 aus dem DOM nur schwer sicher ableiten kann. Die Scores stecken bei den
@@ -237,7 +327,8 @@ nestris-homie.user.js
 ├─ 5. DOM-Zugriff (Scores, Namen, Spielstand)
 ├─ 6. Matchzustand (Zustandsmaschine)
 ├─ 7. Ansage-Logik (Intervall + Events)
-└─ 8. Bedienoberfläche (Floating-Panel)
+├─ 8. Bedienoberfläche (Floating-Panel + Seed/Level-Overlay)
+└─ 9. Initialisierung
 ```
 
 ## Entwicklung
@@ -255,10 +346,13 @@ npm test
   Node-`vm`-Umgebung mit Fake-DOM, Fake-WebSocket und Fake-Sprachausgabe und
   spielt einen kompletten Matchablauf durch (Start → Intervallansage →
   Führungswechsel → Matchende → Trophäen → Raumverlassen). Enthalten sind
-  u. a. die Chasedown-Fälle (Abschnitt 12) und die Levelwechsel-Warnung
-  (Issue #11) – in **beiden** Ausführungsmodi, also auch über die
-  `PAGE_STATE_EVENT`-Brücke der Injektion. Genau dieser Brückenweg war die
-  Ursache, warum die Warnung im ersten Anlauf (v0.9.0) stumm blieb.
+  u. a. die Chasedown-Fälle (Schritt 5c/5d) und die Levelwechsel-Warnung
+  (Issue #11, Schritt 5c0–5c3) – Letztere auch im **Injektions-Modus**, also
+  über die `PAGE_STATE_EVENT`-Brücke (Schritt 12). Genau dieser Brückenweg war
+  die Ursache, warum die Warnung im ersten Anlauf (v0.9.0) stumm blieb.
+  Nicht automatisiert abgedeckt sind bisher die Chat-Nachrichten
+  (Issue #7) und das Seed/Level-Overlay (Issue #10) – beides braucht einen
+  echten WebSocket-`send()` bzw. ein echtes Match-Overlay.
 
 Der Test-Hilfsblock ist im Userscript mit `// @test-helpers:start / :end`
 markiert und wird vom Zahlentest direkt aus der Quelle extrahiert.
@@ -412,8 +506,13 @@ ausgeliefert.
 * Die Selektoren richten sich an der aktuellen nestris.org-Oberfläche. Ändert
   sich das Frontend, sind vor allem die Konstanten `DOM_SEL` (Abschnitt 5) zu
   prüfen – Anleitung in [docs/protokoll.md](docs/protokoll.md), Abschnitt 5.
-* Kein schreibender Zugriff auf das Spiel: NestrisHomie sendet keine
-  WebSocket-Nachrichten und verändert den Spielverlauf nicht.
+* **Schreibzugriff nur auf den Chat:** Bis v0.5.x sendete NestrisHomie
+  ausschließlich Lesebefehle. Seit Issue #7 (v0.6.0) schickt das Skript auf
+  Wunsch `glhf` / `gg` als `{type: "chat", message}` über denselben
+  WebSocket, den auch die Seite benutzt – das ist der **einzige** Eingriff in
+  die Kommunikation. Am Spielverlauf (Brett, Pieces, Punkte) ändert sich
+  nichts, und der Socket wird nur gelesen bzw. für Chat-Nachrichten benutzt.
+  Abschaltbar über die Einstellung **Chat: glhf / gg**.
 * Der Statusfallback ohne WebSocket (`guessStatusFromDom`) greift nur, wenn der
   Mitschnitt nicht aktiv ist – in dem Fall Seite neu laden.
 * Die Server-Option braucht Tampermonkey mit den Grants `GM_xmlhttpRequest`

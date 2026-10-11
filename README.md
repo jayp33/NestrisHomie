@@ -19,6 +19,7 @@ Zusätzlich kommen Events, wenn sich etwas Wesentliches tut.
 | Beide Punktestände | optional, zusammen mit der Intervallansage |
 | „Du übernimmst die Führung!" / „… Führung abgegeben" | sofort beim Führungswechsel |
 | „Der Gegner ist raus!" (Sieg sofort oder Chasedown mit Lücke) | wenn die Gegneranzeige einfriert, während du spielst |
+| „Achtung: 90/120 Linien erreicht – Levelwechsel bald!" | bei 90 und 120 eigenen Lines (Issue #11) |
 | Natürliche Stimme über einen lokalen TTS-Server (Supertonic) | optional, Auto-Erkennung; ohne Server übernimmt die Browser-Stimme |
 
 Die genannte **Differenz wird auf ganze Tausender gerundet**, damit die
@@ -89,6 +90,35 @@ Diagnose in der Browserkonsole: `NestrisHomie.topoutInfo()` zeigt das Alter
 beider Lebenszeichen, ob ein schnelles Signal erkannt wurde und ob der
 Gegner bereits als raus gemeldet ist.
 
+### Levelwechsel-Warnung (Issue #11)
+
+Das Level steigt alle zehn Lines – und mit ihm die Geschwindigkeit. Wer
+mitten im Spiel davon überrascht wird, verliert schnell ein paar Reihen.
+NestrisHomie warnt deshalb vorher:
+
+| Lines | Angesagt |
+| --- | --- |
+| 90 | „Achtung: 90 Linien erreicht – Levelwechsel bald!" |
+| 120 | „Achtung: 120 Linien erreicht – Levelwechsel bald!" |
+
+* Gezählt werden die **eigenen** Lines aus dem `Lines`-Panel der eigenen
+  Seite (`.side.me`).
+* Die Warnung kommt **einmal pro Schwelle und Spiel**. Lines fangen in jedem
+  Spiel eines Matches wieder bei 0 an, die Zähler werden beim Spielstart
+  zurückgesetzt.
+* Nur die **aufsteigende Flanke** zählt: wer die Schwelle schon
+  überschritten hat, wird nicht bei jeder Messung erneut erinnert. Steht der
+  Wert des vorherigen Spiels noch im DOM (bis der Client das neue Spiel
+  aufgebaut hat), bleibt es entsprechend still.
+* Die Warnung setzt sich gegen eine laufende Ansage durch. Fällt sie
+  zufällig in den Ereignisabstand („Mindestabstand", Standard 6 Sek.), geht
+  sie **nicht verloren** – sie wird mit der nächsten Messung (alle 400 ms)
+  erneut angesetzt.
+* Abschaltbar über die Einstellung **Levelwechsel warnen (90/120)**.
+
+Diagnose in der Browserkonsole: `NestrisHomie.levelInfo()` zeigt die
+gelesenen Lines, die Schwellen und welche davon schon angesagt wurden.
+
 ### Events
 
 | Event | Auslöser |
@@ -136,6 +166,7 @@ Danach erscheint unten rechts eine 🎙-Schaltfläche mit dem Einstellungsdialog
 | Führungswechsel ansagen | an | sofortige Meldung bei Führungswechsel |
 | Spielstart / -ende | an | Start, Spielergebnis, Matchende, Trophäen |
 | Chasedown / Sieg ansagen | an | „Gegner ist raus!" beim Topout des Gegners |
+| Levelwechsel warnen (90/120) | an | „Achtung: 90/120 Linien erreicht" vor dem Levelwechsel |
 | Topout erkennen nach | 5 Sek. | Stillstand der Gegneranzeige, der als Topout gilt (3–60 s) |
 | Spielstand ansagen | aus | Siege-Serie in der Intervallansage |
 | Sprache | Deutsch | Ansagetexte `de` / `en` |
@@ -168,12 +199,13 @@ nestris.org (Angular-SPA)
 ├─ DOM ──────────────────────────┐   │
 │   .side.me  /  .side.opponent  │   │
 │   app-nes-panel.score-panel    ▼   ▼
-│   h1 (Score), h1.diff   ┌──────────────────────┐
-│                         │  Ansage-Logik        │
-│                         │  • Intervall-Timer   │
-│                         │  • Lead-Change-Flow  │
-│                         │  • Start/End/Events  │
-│                         └──────────┬───────────┘
+│   app-nes-panel.lines-panel ┌──────────────────────────┐
+│   h1 (Score), h1.diff       │  Ansage-Logik            │
+│                             │  • Intervall-Timer       │
+│                             │  • Lead-Change-Flow      │
+│                             │  • Levelwechsel (90/120) │
+│                             │  • Start/End/Events      │
+│                             └──────────┬───────────────┘
 │                                    ▼
 │                        ┌──────────────────────┐
 └───────────────────────►│  Sprachausgabe (TTS)  │
@@ -222,7 +254,11 @@ npm test
 * `test/userscript.test.js` – lädt das komplette Userscript in einer
   Node-`vm`-Umgebung mit Fake-DOM, Fake-WebSocket und Fake-Sprachausgabe und
   spielt einen kompletten Matchablauf durch (Start → Intervallansage →
-  Führungswechsel → Matchende → Trophäen → Raumverlassen).
+  Führungswechsel → Matchende → Trophäen → Raumverlassen). Enthalten sind
+  u. a. die Chasedown-Fälle (Abschnitt 12) und die Levelwechsel-Warnung
+  (Issue #11) – in **beiden** Ausführungsmodi, also auch über die
+  `PAGE_STATE_EVENT`-Brücke der Injektion. Genau dieser Brückenweg war die
+  Ursache, warum die Warnung im ersten Anlauf (v0.9.0) stumm blieb.
 
 Der Test-Hilfsblock ist im Userscript mit `// @test-helpers:start / :end`
 markiert und wird vom Zahlentest direkt aus der Quelle extrahiert.
@@ -239,6 +275,7 @@ NestrisHomie.setSettings({ intervalSec: 20 })
 NestrisHomie.speechInfo()           // Sprach-Diagnose (siehe unten)
 NestrisHomie.retryFailedSpeech()    // nach Klick gescheiterte Ansage wiederholen
 NestrisHomie.topoutInfo()           // Chasedown-Diagnose (Lebenszeichen beider Seiten)
+NestrisHomie.levelInfo()            // Levelwechsel-Warnung: Lines, Schwellen, Warnstatus
 ```
 
 ### Wenn keine Sprache zu hören ist

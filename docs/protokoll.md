@@ -148,10 +148,20 @@ app-multiplayer-room
          └─ div.my-game                (nur die eigene Seite)
             └─ app-layout-one
                └─ div.panels
-                  └─ app-nes-panel.score-panel
-                     ├─ p              „Score"
-                     ├─ h1             ← eigener Score, z. B. "012345" / "1234567"
-                     └─ h1.diff        ← Vorzeichen-Differenz (me − Gegner), z. B. "+25000"
+                  ├─ app-nes-panel.score-panel
+                  │  ├─ p              „Score"
+                  │  ├─ h1             ← eigener Score, z. B. "012345" / "1234567"
+                  │  └─ h1.diff        ← Vorzeichen-Differenz (me − Gegner), z. B. "+25000"
+                  ├─ div.level-lines
+                  │  ├─ app-nes-panel.level-panel
+                  │  │  ├─ p           „Level"
+                  │  │  └─ h1          ← Level (vor dem Spiel: startLevel)
+                  │  └─ app-nes-panel.lines-panel
+                  │     ├─ p           „Lines"
+                  │     └─ h1          ← gespielte Reihen (Runway, Levelwechsel)
+                  ├─ app-nes-panel.next-box-panel           nächstes Piece
+                  ├─ app-nes-panel.trt-panel                „DRT"/„QUAD" (optional)
+                  └─ app-nes-panel.accuracy-panel           (optional)
 ```
 
 Wichtige Details:
@@ -159,6 +169,14 @@ Wichtige Details:
 * **`.side.me` / `.side.opponent`** – zuverlässigste Unterscheidung, unabhängig
   von der Reihenfolge der Spieler (`getPlayerIndices()` vertauscht sie je nach
   eigener Seite) und unabhängig vom Layout.
+* **Level und Lines** liegen in `div.level-lines` als eigene `app-nes-panel`s
+  (`.level-panel` / `.lines-panel`), jeweils `p` = Label, `h1` = Wert. Solange
+  keine Daten vorliegen, rendert das Panel `-` – `parseScoreText()` liefert
+  dann `null`. NestrisHomie liest daraus die eigenen Lines für die
+  Runway-Ansage (Issue #5) und die Levelwechsel-Warnung (Issue #11). Im
+  Injektions-Modus (Issue #6) werden sie aus der Seitenwelt per
+  `PAGE_STATE_EVENT`-Brücke geliefert – das Polling läuft dort absichtlich
+  nicht in der Sandbox.
 * Der Score ist ein **nullgepaddeter String** (`padStart(6, "0")`), ab 1.000.000
   siebenstellig (CSS-Klasse `seven-digit`), bei fehlenden Daten `"------"`.
 * `h1.diff` wird nur gerendert, wenn ein Gegner-Score bekannt ist
@@ -202,7 +220,16 @@ Daraus lässt sich der Spielstatus ohne WebSocket grob rekonstruieren
    `topoutSec`, während die eigene weiterläuft und mindestens ein „schnelles"
    Signal (Board/DRT/Next Piece) vorhanden ist, gilt der Gegner als raus –
    es folgt die Sieges- oder Chasedown-Ansage (siehe Abschnitt 2.3).
-5. **Sprachausgabe** über eine Warteschlange (periodische Ansagen können
+5. **Levelwechsel-Warnung** (Issue #11): die eigenen Lines (`.lines-panel`
+   auf `.side.me`) werden bei jeder Messung gegen die Schwellen 90/120
+   geprüft. Nur die **aufsteigende Flanke** zählt (wer schon drüber steht,
+   wird nicht erneut erinnert), und der Zähler gilt pro Spiel. Die Schwelle
+   bleibt offen, bis die Ansage wirklich in die Warteschlange gelangt ist –
+   sonst könnte der Ereignisabstand `eventGapSec` sie verschlucken.
+   Achtung Falle: die Messung läuft im Injektions-Modus in der Seitenwelt und
+   erreicht den Skriptkontext nur über die `PAGE_STATE_EVENT`-Brücke; dieser
+   Weg muss `checkLevelWarn()` auslösen, sonst bleibt die Warnung stumm.
+6. **Sprachausgabe** über eine Warteschlange (periodische Ansagen können
    verdrängt werden, Events haben Vorrang). Es gibt zwei Backends: die
    Web Speech API des Browsers und – optional – ein lokales neuronales
    Netz (audio.cpp + Supertonic auf `127.0.0.1:8099`, siehe README
@@ -223,7 +250,11 @@ Nach einem Redeploy von nestris.org gilt:
    NestrisHomie.state             // roomStatus, status, scores …
    NestrisHomie.previewAnnouncement()
    NestrisHomie.topoutInfo()      // Lebenszeichen f. die Chasedown-Erkennung
+   NestrisHomie.levelInfo()       // Lines, Schwellen 90/120, Warnstatus (Issue #11)
    ```
+   Das DOM ist in beiden Welten dasselbe (`document.querySelector` geht auch
+   aus der Sandbox); `levelInfo().lines` zeigt aber die Lines, so wie die
+   Warnlogik sie sieht – im Injektions-Modus also den Wert aus der Brücke.
 4. Falls die JSON-Typen sich ändern: im Bundle nach `t.PING="ping"` suchen –
    dort steht die vollständige Enum-Liste.
 

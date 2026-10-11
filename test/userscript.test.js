@@ -334,11 +334,26 @@ function droughtPanel(score) {
   ]);
 }
 
+/**
+ * Lines-Panel wie auf der echten Seite (app-layout-one):
+ * div.level-lines > app-nes-panel.lines-panel > p "Lines" + h1 (Reihenzahl).
+ * Die Klasse ist umschaltbar, um beide Erkennungswege zu prüfen.
+ */
+let linesPanelClass = 'lines-panel';
+
+function linesPanel(lines) {
+  return gameNode('app-nes-panel', [linesPanelClass], [
+    gameNode('p', [], [], 'Lines'),
+    gameNode('h1', [], [], String(lines)),
+  ]);
+}
+
 function setScores(myScore, oppScore) {
+  lastTuple = [myScore, oppScore];
   const diff = myScore - oppScore;
   const pad = (n) => String(n).padStart(6, '0');
   const signed = (n) => `${n >= 0 ? '+' : ''}${n}`;
-  const buildSide = (name, score, ownDiff, extraClasses) =>
+  const buildSide = (name, score, ownDiff, extraClasses, lines) =>
     gameNode('div', ['side', ...extraClasses], [
       gameNode('div', ['game-header'], [
         gameNode('app-username', [], [gameNode('p', [], [], name)]),
@@ -348,16 +363,27 @@ function setScores(myScore, oppScore) {
           gameNode('div', ['panels'], [
             scorePanel(pad(score), signed(ownDiff)),
             droughtPanel(score),
+            linesPanel(lines),
           ]),
         ]),
       ]),
     ]);
 
   documentRoot.children = [
-    buildSide('ich', myScore, diff, ['blue', 'me']),
-    buildSide('gegner', oppScore, -diff, ['red', 'opponent']),
+    buildSide('ich', myScore, diff, ['blue', 'me'], linesNow.me),
+    buildSide('gegner', oppScore, -diff, ['red', 'opponent'], linesNow.opp),
   ];
 }
+
+/** Nur die Reihenzahlen ändern (Scores bleiben stehen). */
+function setLines(myLines, oppLines) {
+  linesNow.me = myLines;
+  linesNow.opp = oppLines;
+  setScores(lastTuple[0], lastTuple[1]);
+}
+
+let lastTuple = [120000, 95000];
+const linesNow = { me: 0, opp: 0 };
 
 const documentRoot = { children: [] };
 
@@ -470,6 +496,19 @@ async function run() {
   check('eigener Name', scores && scores.myName === 'ich');
   check('Gegner-Name', scores && scores.oppName === 'gegner');
   check('Vorschauansage', api.previewAnnouncement().includes('Du liegst vorn mit fünfundzwanzigtausend'));
+
+  console.log('3b. Lines aus dem Side-Panel lesen (Issue #5/#11)');
+  setLines(42, 17);
+  let withLines = api.readScores();
+  check('eigene Lines über die Panel-Klasse', withLines.myLines === 42, JSON.stringify(withLines));
+  check('gegnerische Lines', withLines.oppLines === 17);
+  // Label-Weg: das Panel trägt eine andere Klasse
+  linesPanelClass = 'andere-klasse';
+  setLines(55, 21);
+  withLines = api.readScores();
+  check('eigene Lines über das Panel-Label', withLines.myLines === 55, JSON.stringify(withLines));
+  linesPanelClass = 'lines-panel';
+  setLines(0, 0);
 
   console.log('4. Match-Status über WebSocket');
   socket.fire(
@@ -603,8 +642,226 @@ async function run() {
     JSON.stringify(spoken),
   );
 
+  console.log('5c0. Levelwechsel-Warnung bei 90/120 Lines (Issue #11)');
+  api.setSettings({ announceLevelChange: true, eventGapSec: 0, topoutSec: 3, announceTopout: true });
+  setLines(0, 0);
+  await sleep(500);
+  spoken.length = 0;
+
+  setLines(89, 40);
+  await sleep(500);
+  check(
+    'keine Warnung unter 90 Lines',
+    !spoken.some((s) => s.includes('Linien erreicht')),
+    JSON.stringify(spoken),
+  );
+
+  setLines(90, 45);
+  await sleep(500);
+  check(
+    'Warnung bei 90 Lines',
+    spoken.some((s) => s.includes('90 Linien erreicht')),
+    JSON.stringify(spoken),
+  );
+  check('Zustand levelWarn90 gesetzt', api.state.levelWarn90 === true);
+
+  spoken.length = 0;
+  setLines(95, 45);
+  await sleep(500);
+  check(
+    '90er-Warnung kommt nur einmal',
+    !spoken.some((s) => s.includes('Linien erreicht')),
+    JSON.stringify(spoken),
+  );
+
+  setLines(120, 60);
+  await sleep(500);
+  check(
+    'Warnung bei 120 Lines',
+    spoken.some((s) => s.includes('120 Linien erreicht')),
+    JSON.stringify(spoken),
+  );
+  check('Zustand levelWarn120 gesetzt', api.state.levelWarn120 === true);
+
+  const lvl = typeof api.levelInfo === 'function' ? api.levelInfo() : null;
+  check(
+    'levelInfo() zeigt Lines, Schwellen und Stand',
+    Boolean(lvl) &&
+      lvl.lines === 120 &&
+      lvl.thresholds.join(',') === '90,120' &&
+      lvl.active === true,
+    JSON.stringify(lvl),
+  );
+
+  console.log('5c1. Die Warnung gilt pro Spiel (Lines beginnen wieder bei 0)');
+  // Das DOM zeigt die Reihen des letzten Spiels, bis der Client das neue
+  // Spiel aufbaut – erst danach beginnt die Zählung wieder bei 0.
+  setLines(0, 0);
+  await sleep(500);
+  socket.fire(
+    JSON.stringify({
+      type: 'room_state_update',
+      state: {
+        type: 'MULTIPLAYER',
+        status: 'BEFORE_GAME',
+        ranked: true,
+        players: [{ username: 'ich' }, { username: 'gegner' }],
+        points: [],
+      },
+    }),
+  );
+  await sleep(120);
+  socket.fire(
+    JSON.stringify({
+      type: 'room_state_update',
+      state: {
+        type: 'MULTIPLAYER',
+        status: 'IN_GAME',
+        ranked: true,
+        players: [{ username: 'ich' }, { username: 'gegner' }],
+        points: [],
+      },
+    }),
+  );
+  await sleep(200);
+  check(
+    'Warnungen beim neuen Spiel zurückgesetzt',
+    api.state.levelWarn90 === false && api.state.levelWarn120 === false,
+    JSON.stringify({ 90: api.state.levelWarn90, 120: api.state.levelWarn120 }),
+  );
+  spoken.length = 0;
+  setLines(95, 50);
+  await sleep(500);
+  check(
+    '90er-Warnung im neuen Spiel erneut',
+    spoken.some((s) => s.includes('90 Linien erreicht')),
+    JSON.stringify(spoken),
+  );
+
+  // Stehen die Lines des alten Spiels noch, darf das keine erneute Warnung
+  // auslösen – nur die aufsteigende Flanke zählt.
+  console.log('5c1b. Stehende Vorwerte des letzten Spiels warnen nicht');
+  socket.fire(
+    JSON.stringify({
+      type: 'room_state_update',
+      state: {
+        type: 'MULTIPLAYER',
+        status: 'BEFORE_GAME',
+        ranked: true,
+        players: [{ username: 'ich' }, { username: 'gegner' }],
+        points: [],
+      },
+    }),
+  );
+  await sleep(120);
+  setLines(120, 60);
+  await sleep(400);
+  spoken.length = 0;
+  socket.fire(
+    JSON.stringify({
+      type: 'room_state_update',
+      state: {
+        type: 'MULTIPLAYER',
+        status: 'IN_GAME',
+        ranked: true,
+        players: [{ username: 'ich' }, { username: 'gegner' }],
+        points: [],
+      },
+    }),
+  );
+  await sleep(500);
+  check(
+    'keine Warnung durch stehende Lines des alten Spiels',
+    !spoken.some((s) => s.includes('Linien erreicht')),
+    JSON.stringify(spoken),
+  );
+
+  console.log('5c2. Abgeschaltet bleibt es still');
+  api.setSettings({ announceLevelChange: false });
+  socket.fire(
+    JSON.stringify({
+      type: 'room_state_update',
+      state: {
+        type: 'MULTIPLAYER',
+        status: 'BEFORE_GAME',
+        ranked: true,
+        players: [{ username: 'ich' }, { username: 'gegner' }],
+        points: [],
+      },
+    }),
+  );
+  await sleep(120);
+  socket.fire(
+    JSON.stringify({
+      type: 'room_state_update',
+      state: {
+        type: 'MULTIPLAYER',
+        status: 'IN_GAME',
+        ranked: true,
+        players: [{ username: 'ich' }, { username: 'gegner' }],
+        points: [],
+      },
+    }),
+  );
+  await sleep(200);
+  setLines(0, 0);
+  await sleep(400);
+  spoken.length = 0;
+  setLines(200, 50);
+  await sleep(500);
+  check(
+    'keine Warnung, wenn die Einstellung aus ist',
+    !spoken.some((s) => s.includes('Linien erreicht')),
+    JSON.stringify(spoken),
+  );
+  api.setSettings({ announceLevelChange: true });
+
+  console.log('5c3. Warnung überlebt den Ereignisabstand (Issue #11)');
+  api.setSettings({ eventGapSec: 3 });
+  socket.fire(
+    JSON.stringify({
+      type: 'room_state_update',
+      state: {
+        type: 'MULTIPLAYER',
+        status: 'BEFORE_GAME',
+        ranked: true,
+        players: [{ username: 'ich' }, { username: 'gegner' }],
+        points: [],
+      },
+    }),
+  );
+  await sleep(120);
+  socket.fire(
+    JSON.stringify({
+      type: 'room_state_update',
+      state: {
+        type: 'MULTIPLAYER',
+        status: 'IN_GAME',
+        ranked: true,
+        players: [{ username: 'ich' }, { username: 'gegner' }],
+        points: [],
+      },
+    }),
+  );
+  await sleep(200);
+  setLines(0, 0);
+  await sleep(400);
+  // Führungswechsel belegt den Ereignisabstand (eventGapSec = 3 s) …
+  setScores(95000, 100000);
+  await sleep(200);
+  spoken.length = 0;
+  // … die Warnung kommt im Schatten dieses Ereignisses über die Schwelle.
+  setLines(90, 50);
+  await sleep(3600);
+  check(
+    'Warnung kommt trotz Ereignisabstand an',
+    spoken.some((s) => s.includes('90 Linien erreicht')),
+    JSON.stringify(spoken),
+  );
+  check('Zustand levelWarn90 danach gesetzt', api.state.levelWarn90 === true);
+  api.setSettings({ eventGapSec: 0 });
+
   console.log('5c. Chasedown: Gefriert die Gegneranzeige?');
-  api.setSettings({ topoutSec: 3, announceTopout: true });
   spoken.length = 0;
 
   // Beide Seiten einfrieren: Auch wenn der Gegner stillsteht, darf nichts
@@ -999,6 +1256,28 @@ async function run() {
       check('IN_GAME kam über die Brücke an', api2.state.status === 'IN_GAME', `ist ${api2.state.status}`);
       check('Raumrolle über die Brücke', api2.state.roomStatus === 'player');
       check('Empfangszeitpunkt vermerkt', api2.state.hook.lastMsgAt > 0);
+
+      // Levelwechsel-Warnung (Issue #11): Im Injektions-Modus (Chromium) läuft
+      // das DOM-Polling in der Seitenwelt – nur über die Brücke erreichen die
+      // Lines den Skriptkontext. Ohne diesen Weg bleibt die Warnung stumm.
+      // Der erste Kontext (Seitenkontext) läuft im Test weiter mit und sieht
+      // dasselbe DOM – er wird deshalb stumm geschaltet, damit nur der
+      // Injektions-Weg übrig bleibt.
+      api.setSettings({ announceLevelChange: false });
+      const spokenBefore = spoken.length;
+      setLines(90, 30);
+      await sleep(700);
+      const heardInjection = spoken.slice(spokenBefore);
+      check(
+        'Levelwechsel-Warnung über die Injektions-Brücke (Issue #11)',
+        heardInjection.some((s) => s.includes('90 Linien erreicht')),
+        JSON.stringify(heardInjection),
+      );
+      check(
+        'Zustand levelWarn90 über die Brücke gesetzt',
+        api2.state.levelWarn90 === true,
+        JSON.stringify(typeof api2.levelInfo === 'function' ? api2.levelInfo() : null),
+      );
     }
 
     documentStub.createElement = realCreate;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NestrisHomie – Sprachassistent für nestris.org
 // @namespace    nestris-homie
-// @version      0.9.0
+// @version      0.9.1
 // @description  Sprachansagen während 1v1-Matches auf nestris.org: alle 30 Sekunden Vorsprung/Rückstand,
 //               plus Events (Spielstart, Führungswechsel, Chasedown/Sieg beim Gegner-Topout,
 //               Spiel-/Matchende, Trophäen). Sprachausgabe über die Browser-Stimme oder optional
@@ -86,6 +86,11 @@
     // Chat-Nachrichten (Issue #7): 'glhf' bei Matchbeginn, 'gg' bei Matchende
     announceChat: true,
   };
+
+  // Levelwechsel-Warnung (Issue #11): ab wie vielen Lines gewarnt wird.
+  // Die Reihenzahl bezieht sich auf das eigene Spiel – Lines fangen in jedem
+  // Spiel eines Matches wieder bei 0 an.
+  const LEVEL_WARN_LINES = [90, 120];
 
   /** @type {typeof DEFAULTS} */
   let settings = { ...DEFAULTS, ...readJson(SETTINGS_KEY) };
@@ -907,6 +912,7 @@
      username: 'app-username p',
      series: 'p.score',
      countdown: 'h1.countdown',
+     linesPanel: 'app-nes-panel.lines-panel',
    };
 
    const PAGE_FN_DEFS = `
@@ -952,15 +958,25 @@ function readSeries(side) {
 }
 function readSideLines(side) {
   if (!side) return null;
+  const byClass = qs(side, '${PAGE_DOM_SEL.linesPanel}');
+  if (byClass) {
+    const v = readPanelValue(byClass);
+    if (v !== null) return v;
+  }
   const panels = side.querySelectorAll('app-nes-panel');
   for (const panel of panels) {
     const labelEl = panel.querySelector('p');
     const label = labelEl ? labelEl.textContent.trim() : '';
-    if (label !== 'Lines') continue;
-    for (const h of panel.querySelectorAll('h1')) {
-      const v = parseScoreText(h.textContent);
-      if (v !== null) return v;
-    }
+    if (!/^lines$/i.test(label)) continue;
+    const v = readPanelValue(panel);
+    if (v !== null) return v;
+  }
+  return null;
+}
+function readPanelValue(panel) {
+  for (const h of panel.querySelectorAll('h1')) {
+    const v = parseScoreText(h.textContent);
+    if (v !== null) return v;
   }
   return null;
 }
@@ -1179,7 +1195,9 @@ function pollPageState() {
     scores.myName !== lastScores.myName ||
     scores.oppName !== lastScores.oppName ||
     scores.mySeries !== lastScores.mySeries ||
-    scores.oppSeries !== lastScores.oppSeries;
+    scores.oppSeries !== lastScores.oppSeries ||
+    scores.myLines !== lastScores.myLines ||
+    scores.oppLines !== lastScores.oppLines;
   lastScores = scores;
 
   document.dispatchEvent(new CustomEvent('${PAGE_STATE_EVENT}', {
@@ -1265,6 +1283,9 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       if (detail.scores) {
         const prevScores = state.scores;
         state.scores = detail.scores;
+        // Levelwechsel-Warnung (Issue #11) auf jeder Messung prüfen: Lines
+        // können sich geändert haben, ohne dass sich Score/Differenz rühren.
+        checkLevelWarn(detail.scores);
         if (detail.changed && detail.scores) {
           handleLeadChange(detail.scores);
           watchTopout();
@@ -1395,6 +1416,8 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     username: 'app-username p',
     series: 'p.score',
     countdown: 'h1.countdown',
+    // Lines-Panel einer Seite (app-layout-one: Level + Lines)
+    linesPanel: 'app-nes-panel.lines-panel',
     // Seed/Level Overlay (Issue #10)
     seedOverlay: '#nh-seed-overlay',
     seedValue: '#nh-seed-value',
@@ -1404,15 +1427,28 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
   /** Liest Lines (Reihen) aus dem Side-Panel. */
   function readSideLines(side) {
     if (!side) return null;
-    const panels = side.querySelectorAll('app-nes-panel');
-    for (const panel of panels) {
+    // Schneller Weg über die Klasse (Bundle: app-nes-panel.lines-panel);
+    // der Label-Weg danach hält die Erkennung robust, falls sie umbenannt wird.
+    const byClass = qs(side, DOM_SEL.linesPanel);
+    if (byClass) {
+      const v = readPanelValue(byClass);
+      if (v !== null) return v;
+    }
+    for (const panel of side.querySelectorAll('app-nes-panel')) {
       const labelEl = panel.querySelector('p');
       const label = labelEl ? labelEl.textContent.trim() : '';
-      if (label !== 'Lines') continue;
-      for (const h of panel.querySelectorAll('h1')) {
-        const v = parseScoreText(h.textContent);
-        if (v !== null) return v;
-      }
+      if (!/^lines$/i.test(label)) continue;
+      const v = readPanelValue(panel);
+      if (v !== null) return v;
+    }
+    return null;
+  }
+
+  /** Erste Zahl aus den h1-Werten eines Panels (z. B. "42", "-" -> null). */
+  function readPanelValue(panel) {
+    for (const h of panel.querySelectorAll('h1')) {
+      const v = parseScoreText(h.textContent);
+      if (v !== null) return v;
     }
     return null;
   }
@@ -1661,6 +1697,9 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     // Levelwechsel-Warnung (Issue #11): welche Schwellen schon angesagt wurden
     levelWarn90: false,
     levelWarn120: false,
+    // Lines der letzten Messung – bleibt über Spielgrenzen erhalten, damit nur
+    // die aufsteigende Flanke einer Schwelle eine Warnung auslöst.
+    lastLines: null,
     // WebSocket-Mitschnitt (Issue #6): wie der Hook installiert wurde und
     // ob je eine Nachricht ankam – für die Statuszeile und die Konsole.
     hook: { mode: '–', installed: false, lastMsgAt: 0 },
@@ -1736,6 +1775,9 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       state.endedAt = null;
       state.lastSign = 0;
       resetTopoutWatch();
+      // Levelwechsel-Warnungen (Issue #11) gelten pro Spiel: Lines fangen in
+      // jedem Spiel eines Matches wieder bei 0 an.
+      resetLevelWarnings();
       state.scores = readScores();
       schedulePeriodic(settings.intervalSec * 1000);
       // Seed/Level Overlay ausblenden beim Spielstart (Issue #10)
@@ -1783,8 +1825,7 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     state.inGameSince = null;
     state.endedAt = null;
     state.pendingTrophy = null;
-    state.levelWarn90 = false;
-    state.levelWarn120 = false;
+    resetLevelWarnings();
     resetTopoutWatch();
     TTS.clearPending('periodic');
     // Laufende Ansagen bewusst NICHT abbrechen: Das Ergebnis eines gerade
@@ -1796,11 +1837,12 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
    * ============================================================ */
 
   function emitEvent(text, { interrupt = false, requireGap = true } = {}) {
-    if (!settings.enabled || !text) return;
+    if (!settings.enabled || !text) return false;
     const now = Date.now();
-    if (requireGap && now - state.lastEventAt < settings.eventGapSec * 1000) return;
+    if (requireGap && now - state.lastEventAt < settings.eventGapSec * 1000) return false;
     state.lastEventAt = now;
     TTS.say(text, { kind: 'event', interrupt });
+    return true;
   }
 
   /** Periodische Statusansage alle n Sekunden. */
@@ -1932,22 +1974,56 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
     }
   }
 
-  /** Levelwechsel-Warnung bei 90/120 Lines prüfen (Issue #11). */
+  /**
+   * Levelwechsel-Warnung bei 90/120 Lines prüfen (Issue #11).
+   *
+   * Läuft auf jeder Messung (400 ms) – auch über die CustomEvent-Brücke aus
+   * der Seitenwelt, siehe PAGE_STATE_EVENT-Handler. Gemeldet wird nur die
+   * **aufsteigende Flanke**: wer die Schwelle schon überschritten hat, wird
+   * nicht bei jeder Messung erneut daran erinnert (und der noch stehende
+   * Vorwert des letzten Spiels löst keine Warnung aus).
+   *
+   * Kommt eine fällige Ansage am Ereignisabstand (eventGapSec) nicht durch,
+   * gilt die Schwelle weiterhin als offen und wird bei der nächsten Messung
+   * erneut versucht – die Warnung darf nicht verloren gehen.
+   */
   function checkLevelWarn(s) {
-    if (!isPlaying() || !settings.announceLevelChange) return;
-    if (!s || s.myLines === null) return;
-
+    if (!s || typeof s.myLines !== 'number') return;
     const lines = s.myLines;
-    // 90 Lines Warnung
-    if (!state.levelWarn90 && lines >= 90) {
-      state.levelWarn90 = true;
-      emitEvent(t('levelWarn90'), { interrupt: false, requireGap: true });
+
+    // Zwischen den Spielen den Vorwert trotzdem nachziehen: das DOM zeigt die
+    // Lines des letzten Spiels, bis der Client das neue Spiel aufgebaut hat.
+    if (!isPlaying() || !settings.announceLevelChange) {
+      state.lastLines = lines;
+      return;
     }
-    // 120 Lines Warnung
-    if (!state.levelWarn120 && lines >= 120) {
-      state.levelWarn120 = true;
-      emitEvent(t('levelWarn120'), { interrupt: false, requireGap: true });
+
+    const prev = state.lastLines;
+    let pending = false;
+    for (const threshold of LEVEL_WARN_LINES) {
+      const key = `levelWarn${threshold}`;
+      if (state[key] || lines < threshold) continue;
+      if (prev !== null && prev >= threshold) continue;
+      const text = t(`levelWarn${threshold}`);
+      if (!text) continue; // Schwelle ohne Ansage-Text: nichts zu tun
+      // interrupt: die Warnung soll sich gegen eine laufende Ansage
+      // durchsetzen – sie kommt zeitnah zum Levelwechsel.
+      if (emitEvent(text, { interrupt: true, requireGap: true })) {
+        state[key] = true;
+        console.log(LOG, `Levelwechsel-Warnung: ${threshold} Lines erreicht`);
+      } else {
+        // Am Ereignisabstand gescheitert: beim nächsten Poll erneut versuchen.
+        // Der Vorwert darf sich dabei nicht mitverschieben, sonst verliert die
+        // Schwelle ihre aufsteigende Flanke.
+        pending = true;
+      }
     }
+    if (!pending) state.lastLines = lines;
+  }
+
+  /** Levelwechsel-Warnungen für ein neues Spiel zurücksetzen (Issue #11). */
+  function resetLevelWarnings() {
+    for (const threshold of LEVEL_WARN_LINES) state[`levelWarn${threshold}`] = false;
   }
 
   /* --- Chasedown / früher Sieg (Gegner-Topout) --------------------------- */
@@ -2638,6 +2714,20 @@ const PAGE_HOOK_SNIPPET = buildPageHookSnippet();
       meAgeMs: state.meSigAt === null ? null : Date.now() - state.meSigAt,
       oppFast: state.oppFast,
       inGameAgeMs: state.inGameSince === null ? null : Date.now() - state.inGameSince,
+    }),
+    /**
+     * Diagnose der Levelwechsel-Warnungen (Issue #11) für die Konsole:
+     *   NestrisHomie.levelInfo()
+     * Zeigt die gelesenen Lines, welche Schwellen schon angesagt wurden und ob
+     * die Ansage gerade aktiv ist (nur im eigenen Spiel).
+     */
+    levelInfo: () => ({
+      active: settings.announceLevelChange && isPlaying(),
+      thresholds: LEVEL_WARN_LINES.slice(),
+      lines: state.scores ? state.scores.myLines : null,
+      warned: LEVEL_WARN_LINES.map((threshold) => state[`levelWarn${threshold}`]),
+      lastLines: state.lastLines,
+      eventGapSec: settings.eventGapSec,
     }),
   };
 
